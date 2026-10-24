@@ -1,0 +1,190 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+* {
+  margin: 0;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-1);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+}
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+}
+em,
+i {
+  font-style: normal;
+}
+::selection {
+  background: rgba(62, 139, 255, 0.35);
+}
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(159, 176, 198, 0.22) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(159, 176, 198, 0.18);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(159, 176, 198, 0.35);
+}
+
+/* 字号 / 字体工具类 */
+.t1 {
+  font: 600 24px/1.3 var(--font-display);
+  letter-spacing: 0.2px;
+}
+.t2 {
+  font: 600 17px/1.35 var(--font-display);
+}
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.caption {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.text-2 {
+  color: var(--text-2);
+}
+.flex-spacer {
+  flex: 1;
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+.w-120 {
+  width: 120px;
+  flex: none;
+}
+.w-160 {
+  width: 160px;
+  flex: none;
+}
+
+/* 背景氛围：深空蓝黑 + 三个大型径向光晕 + 极细网格纹理 */
+.bg-aurora {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 620px at 10% -10%, rgba(62, 139, 255, 0.14), transparent 62%),
+    radial-gradient(820px 560px at 94% 10%, rgba(79, 195, 247, 0.09), transparent 60%),
+    radial-gradient(1000px 720px at 55% 118%, rgba(139, 92, 246, 0.08), transparent 62%);
+}
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1.5px, transparent 1.5px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1.5px, transparent 1.5px);
+  background-size: 32px 32px;
+  -webkit-mask-image: radial-gradient(1200px 820px at 62% 28%, #000 18%, transparent 82%);
+  mask-image: radial-gradient(1200px 820px at 62% 28%, #000 18%, transparent 82%);
+}
+
+/* 入场动效：fadeUp 16px · stagger 60ms */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-up {
+  animation: fadeUp var(--dur-2) var(--ease-out) both;
+}
+
+/* 可访问性偏好：降低透明度（填充更实，文字对比度优先） */
+html.less-glass .glass-shell,
+html.less-glass .glass-card,
+html.less-glass .glass-control,
+html.less-glass .glass-floating {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html.less-glass .glass-shell {
+  background: rgba(26, 36, 56, 0.94);
+}
+html.less-glass .glass-card {
+  background: rgba(30, 40, 60, 0.92);
+}
+html.less-glass .glass-control {
+  background: rgba(34, 44, 64, 0.92);
+}
+html.less-glass .glass-floating {
+  background: rgba(26, 36, 56, 0.96);
+}
+
+/* 低性能模式：无模糊、纯半透明、关闭循环动效 */
+html.low-perf *,
+html.low-perf *::before,
+html.low-perf *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  animation-duration: 0.001s !important;
+  animation-iteration-count: 1 !important;
+}
+html.low-perf .glass-shell {
+  background: rgba(23, 32, 50, 0.96);
+}
+html.low-perf .glass-card {
+  background: rgba(27, 36, 55, 0.95);
+}
+html.low-perf .glass-control {
+  background: rgba(31, 40, 59, 0.95);
+}
