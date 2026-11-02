@@ -1,0 +1,17 @@
+{
+  "name": "ourjia-paas-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ssh2": "^1.16.0"
+  }
+}

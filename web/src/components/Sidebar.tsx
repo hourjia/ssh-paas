@@ -1,53 +1,66 @@
-import { Icon } from './Icons'
-import type { IconName } from './Icons'
-import { useApp } from '../state'
-import type { Route } from '../types'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { BrandMark, GridIcon, ServerIcon, SettingsIcon } from '../icons'
 
-const items: { page: Route['page']; icon: IconName; label: string }[] = [
-  { page: 'servers', icon: 'server', label: '服务器' },
-  { page: 'services', icon: 'cube', label: '服务' },
-  { page: 'executions', icon: 'terminal', label: '执行记录' },
-  { page: 'settings', icon: 'settings', label: '设置' },
+export type PageKey = 'apps' | 'servers'
+
+const NAV_ITEMS: { key: PageKey; label: string; icon: typeof GridIcon }[] = [
+  { key: 'apps', label: '应用', icon: GridIcon },
+  { key: 'servers', label: '服务器', icon: ServerIcon },
 ]
 
-export function Sidebar() {
-  const app = useApp()
-  const activePage: Route['page'] =
-    app.route.page === 'server' || app.route.page === 'config' ? 'servers' : app.route.page
+interface SidebarProps {
+  page: PageKey
+  onPage: (page: PageKey) => void
+  onSettings: () => void
+}
+
+export function Sidebar({ page, onPage, onSettings }: SidebarProps) {
+  const navRef = useRef<HTMLElement>(null)
+  const [pill, setPill] = useState({ top: 0, height: 52 })
+
+  const measure = () => {
+    const active = navRef.current?.querySelector<HTMLElement>('.nav-item.active')
+    if (active) setPill({ top: active.offsetTop, height: active.offsetHeight })
+  }
+
+  useLayoutEffect(() => {
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [page])
 
   return (
-    <aside className={`sidebar${app.collapsed ? ' is-collapsed' : ''}`}>
-      <div className="logo">
-        <span className="logo-mark">
-          <Icon name="stack" size={19} />
-        </span>
-        <span className="logo-text">
+    <aside className="sidebar glass sheen">
+      <div className="brand">
+        <BrandMark className="brand-mark" />
+        <div className="brand-text">
           <strong>Ourjia PaaS</strong>
-          <span className="caption">服务器服务管理</span>
-        </span>
+          <span>SSH 运维</span>
+        </div>
       </div>
-      <nav className="nav">
-        {items.map((it) => (
+
+      <nav className="nav" ref={navRef} aria-label="主导航">
+        <div className="nav-indicator" style={{ transform: `translateY(${pill.top}px)`, height: pill.height }} />
+        {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
           <button
-            key={it.page}
-            type="button"
-            className={`nav-item${activePage === it.page ? ' is-active' : ''}`}
-            onClick={() => app.navigate({ page: it.page } as Route)}
-            title={it.label}
+            key={key}
+            className={`nav-item${page === key ? ' active' : ''}`}
+            onClick={() => onPage(key)}
           >
-            <span className="nav-ic">
-              <Icon name={it.icon} size={17} />
-            </span>
-            <span className="nav-label">{it.label}</span>
-            {it.page === 'executions' && app.runningCount > 0 && <span className="nav-badge mono">{app.runningCount}</span>}
+            <Icon />
+            <span>{label}</span>
           </button>
         ))}
       </nav>
+
       <div className="sidebar-foot">
-        <span className="caption sidebar-ver">v0.1.0 · 设计原型</span>
-        <button type="button" className="collapse-btn" onClick={app.toggleCollapsed}>
-          <Icon name="chevronsLeft" size={15} className="chev" />
-          <span className="nav-label">收起侧栏</span>
+        <div className="node-chip glass-lite">
+          <i />
+          本地节点 · 已连接
+        </div>
+        <button className="settings-btn" onClick={onSettings}>
+          <SettingsIcon />
+          <span>设置</span>
         </button>
       </div>
     </aside>

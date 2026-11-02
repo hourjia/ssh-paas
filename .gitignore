@@ -1,18 +1,5 @@
-# Python
-__pycache__/
-*.pyc
-server/venv/
-server/db.sqlite3
-server/media/
-
-# Node
 node_modules/
 dist/
-*.local
-
-# 环境与编辑器
-.env
-.env.*
-.idea/
-.vscode/
+server/data/
 *.log
+.DS_Store

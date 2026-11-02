@@ -1,55 +1,227 @@
-import { useState } from 'react'
-import { AppStateProvider, useApp } from './state'
-import { Sidebar } from './components/Sidebar'
-import { TopBar } from './components/TopBar'
-import { BindServerModal, ConfirmModal } from './components/Modals'
-import { EnvReportModal } from './components/EnvReportModal'
-import { ExecConsole } from './components/ExecConsole'
-import { Toasts } from './components/ui'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import * as api from './api'
+import type { AddServerPayload, ServerRecord, Settings } from './types'
+import { DEFAULT_SETTINGS } from './types'
+import { Sidebar, type PageKey } from './components/Sidebar'
+import { ActionDock } from './components/ActionDock'
 import { ServersPage } from './pages/ServersPage'
-import { ServerDetailPage } from './pages/ServerDetailPage'
-import { ServiceConfigPage } from './pages/ServiceConfigPage'
-import { ServicesPage } from './pages/ServicesPage'
-import { ExecutionsPage } from './pages/ExecutionsPage'
-import { SettingsPage } from './pages/SettingsPage'
+import { AppsPage } from './pages/AppsPage'
+import { AddServerModal } from './components/AddServerModal'
+import { SettingsModal } from './components/SettingsModal'
+import { Toasts, type ToastItem } from './components/Toasts'
 
-function Shell() {
-  const app = useApp()
-  const [scrolled, setScrolled] = useState(false)
+const SETTINGS_KEY = 'ourjia-paas-settings-v1'
 
-  return (
-    <div className="app">
-      <div className="bg-aurora" />
-      <div className="bg-grid" />
-      <Sidebar />
-      <div className="main">
-        <TopBar scrolled={scrolled} />
-        <div className="content" onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 6)}>
-          {app.route.page === 'servers' && <ServersPage />}
-          {app.route.page === 'server' && <ServerDetailPage id={app.route.serverId} />}
-          {app.route.page === 'config' && <ServiceConfigPage serverId={app.route.serverId} serviceId={app.route.serviceId} />}
-          {app.route.page === 'services' && <ServicesPage />}
-          {app.route.page === 'executions' && <ExecutionsPage />}
-          {app.route.page === 'settings' && <SettingsPage />}
-        </div>
-      </div>
-      <BindServerModal />
-      <ConfirmModal />
-      {app.envTask && <EnvReportModal key={app.envTask.taskId} />}
-      {app.consoleTask && (
-        <ExecConsole
-          key={`${app.consoleTask.serverId}/${app.consoleTask.serviceId}/${app.consoleTask.mode}/${app.consoleTask.action ?? ''}`}
-        />
-      )}
-      <Toasts />
-    </div>
-  )
+function loadSettings(): Settings {
+  try {
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }
+  } catch {
+    return DEFAULT_SETTINGS
+  }
+}
+
+function applyMaterial(s: Settings) {
+  const root = document.documentElement
+  root.dataset.theme = s.theme
+  const blur = s.reduceTrans ? 12 : 12 + s.glass * 0.2
+  const alpha = s.reduceTrans ? 0.92 : 0.28 + s.glass * 0.005
+  const cardAlpha = s.reduceTrans ? 0.95 : 0.52 + s.glass * 0.0042
+  root.style.setProperty('--glass-blur', `${blur.toFixed(1)}px`)
+  root.style.setProperty('--glass-a', alpha.toFixed(3))
+  root.style.setProperty('--glass-a-dark', (alpha * 0.16).toFixed(3))
+  root.style.setProperty('--card-a', cardAlpha.toFixed(3))
+  root.style.setProperty('--card-a-dark', (cardAlpha * 0.13).toFixed(3))
+}
+
+const AUTO_REFRESH_MS: Record<Exclude<Settings['autoRefresh'], 'off'>, number> = {
+  '30': 30_000,
+  '60': 60_000,
+  '300': 300_000,
 }
 
 export default function App() {
+  const [page, setPage] = useState<PageKey>('servers')
+  const [servers, setServers] = useState<ServerRecord[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
+  const [settings, setSettings] = useState<Settings>(loadSettings)
+  const [addOpen, setAddOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [toasts, setToasts] = useState<ToastItem[]>([])
+
+  const toastSeq = useRef(0)
+  const serversRef = useRef(servers)
+  serversRef.current = servers
+
+  const toast = useCallback((msg: string) => {
+    const id = ++toastSeq.current
+    setToasts((ts) => [...ts, { id, msg, leaving: false }])
+    setTimeout(() => {
+      setToasts((ts) => ts.map((t) => (t.id === id ? { ...t, leaving: true } : t)))
+    }, 2600)
+    setTimeout(() => {
+      setToasts((ts) => ts.filter((t) => t.id !== id))
+    }, 3050)
+  }, [])
+
+  const fetchServers = useCallback(async () => {
+    try {
+      const { servers: list } = await api.listServers()
+      setServers(list)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '加载服务器列表失败')
+    } finally {
+      setLoaded(true)
+    }
+  }, [toast])
+
+  useEffect(() => {
+    fetchServers()
+  }, [fetchServers])
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    applyMaterial(settings)
+  }, [settings])
+
+  const testOne = useCallback(
+    async (id: string) => {
+      setTestingIds((prev) => new Set(prev).add(id))
+      try {
+        const { server } = await api.testServer(id)
+        setServers((prev) => prev.map((s) => (s.id === id ? server : s)))
+      } catch (e) {
+        toast(e instanceof Error ? e.message : '连接测试失败')
+      } finally {
+        setTestingIds((prev) => {
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+      }
+    },
+    [toast],
+  )
+
+  const testAll = useCallback(
+    async (silent: boolean) => {
+      const ids = serversRef.current.map((s) => s.id)
+      if (!ids.length) {
+        if (!silent) toast('没有需要刷新的服务器')
+        return
+      }
+      await Promise.all(ids.map((id) => testOne(id)))
+      if (!silent) toast('状态已刷新')
+    },
+    [testOne, toast],
+  )
+
+  useEffect(() => {
+    if (settings.autoRefresh === 'off' || page !== 'servers') return
+    const ms = AUTO_REFRESH_MS[settings.autoRefresh]
+    const timer = setInterval(() => testAll(true), ms)
+    return () => clearInterval(timer)
+  }, [settings.autoRefresh, page, testAll])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setAddOpen(false)
+        setSettingsOpen(false)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  const handleAdd = useCallback(
+    async (payload: AddServerPayload): Promise<string | null> => {
+      try {
+        const { server } = await api.addServer(payload)
+        setServers((prev) => [server, ...prev])
+        toast(`服务器「${server.name}」已添加`)
+        return null
+      } catch (e) {
+        return e instanceof Error ? e.message : '添加服务器失败'
+      }
+    },
+    [toast],
+  )
+
+  const handleDelete = useCallback(
+    async (id: string) => {
+      try {
+        await api.deleteServer(id)
+        setServers((prev) => prev.filter((s) => s.id !== id))
+        toast('服务器已删除')
+      } catch (e) {
+        toast(e instanceof Error ? e.message : '删除失败')
+      }
+    },
+    [toast],
+  )
+
+  const onlineCount = servers.filter((s) => s.status === 'online').length
+  const keyCount = servers.filter((s) => s.authType === 'key' && s.keyInstalled).length
+  const sep = <span className="sep" />
+
   return (
-    <AppStateProvider>
-      <Shell />
-    </AppStateProvider>
+    <>
+      <div className="bg-mesh" aria-hidden="true">
+        <div className="blob b1" />
+        <div className="blob b2" />
+        <div className="blob b3" />
+      </div>
+      <div className="grain" aria-hidden="true" />
+
+      <div className="shell">
+        <Sidebar page={page} onPage={setPage} onSettings={() => setSettingsOpen(true)} />
+
+        <main className="main">
+          <header className="page-head">
+            <p className="eyebrow">{page === 'servers' ? 'Workspace · 服务器集群' : 'Workspace · 应用矩阵'}</p>
+            <h1>{page === 'servers' ? '服务器' : '应用'}</h1>
+            <p className="page-sub">
+              {page === 'servers' ? (
+                <>
+                  {servers.length} 台服务器{sep}
+                  {onlineCount} 台在线{sep}
+                  {keyCount} 台密钥认证
+                </>
+              ) : (
+                <>应用与服务状态管理将在后续版本开放</>
+              )}
+            </p>
+          </header>
+
+          <ActionDock
+            showRefresh={page === 'servers'}
+            onAdd={() => (page === 'servers' ? setAddOpen(true) : toast('应用管理将在后续版本开放'))}
+            onRefresh={() => testAll(false)}
+          />
+
+          {page === 'servers' ? (
+            loaded ? (
+              <ServersPage
+                servers={servers}
+                testingIds={testingIds}
+                onTest={(id) => testOne(id)}
+                onDelete={handleDelete}
+                onManage={() => toast('服务器详情页将在后续版本开放')}
+                onAdd={() => setAddOpen(true)}
+              />
+            ) : null
+          ) : (
+            <AppsPage onGoServers={() => setPage('servers')} />
+          )}
+
+          <p className="foot-note">Ourjia PaaS v0.1 · SSH 运维平台</p>
+        </main>
+      </div>
+
+      <AddServerModal open={addOpen} onClose={() => setAddOpen(false)} onSubmit={handleAdd} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onChange={setSettings} />
+      <Toasts items={toasts} />
+    </>
   )
 }
