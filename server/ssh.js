@@ -142,6 +142,27 @@ export function sftpWrite(conn, remotePath, content, mode = 0o644) {
   })
 }
 
+// 二进制文件上传（git bundle 等），不能走 sftpWrite 的字符串编码
+export function sftpUpload(conn, localPath, remotePath, mode = 0o600) {
+  return new Promise((resolve, reject) => {
+    conn.sftp((err, sftp) => {
+      if (err) return reject(new Error(friendlySshError(err)))
+      sftp.fastPut(localPath, remotePath, (putErr) => {
+        if (putErr) {
+          sftp.end()
+          reject(putErr)
+          return
+        }
+        sftp.chmod(remotePath, mode, (chmodErr) => {
+          sftp.end()
+          if (chmodErr) reject(chmodErr)
+          else resolve()
+        })
+      })
+    })
+  })
+}
+
 const PROBE_CMD = '(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"); uname -srm'
 
 export async function probeServer(conn) {

@@ -2,85 +2,11 @@ import { execScript, sftpWrite } from './ssh.js'
 import { configHash, resolveSwapMb, resolveTraefikImage } from './config.js'
 import { collectFacts, probeRegistryMirrors } from './check.js'
 import { appendLog, updateStep, setJobState } from './jobs.js'
+import { StepError, runStep, echoScript, forward, flushCarry, tailOf } from './step-runner.js'
 
 const INIT_DIR = '/srv/.ourjia'
 const INIT_RECORD = `${INIT_DIR}/init.json`
 const DAEMON_JSON = '/etc/docker/daemon.json'
-const EVERYTHING_EXIT = 'OJ_EXIT:'
-
-class StepError extends Error {
-  constructor(message, detail) {
-    super(message)
-    this.detail = detail
-  }
-}
-
-// 执行一段步骤脚本，实时转发输出；脚本末尾自带 OJ_EXIT 标记以回传退出码
-async function runStep(job, conn, stepId, script, timeoutMs, title) {
-  updateStep(job, stepId, { status: 'running', startedAt: new Date().toISOString() })
-  job.currentStep = stepId
-  if (title) echoScript(job, title, script)
-  const result = await execScript(conn, wrapWithMarker(script), {
-    timeoutMs,
-    onStdout: (text) => forward(job, text, 'out'),
-    onStderr: (text) => forward(job, text, 'err'),
-  })
-  const code = extractExitCode(result.stdout, result.code)
-  updateStep(job, stepId, { status: code === 0 ? 'done' : 'failed', finishedAt: new Date().toISOString() })
-  if (code !== 0) {
-    const tail = tailOf(result.stderr || result.stdout)
-    throw new StepError(`步骤执行失败（退出码 ${code}）`, tail)
-  }
-  return result
-}
-
-// 把要执行的脚本原样回显到日志，方便人工复制到终端复现/排障
-function echoScript(job, title, script) {
-  appendLog(job, `$ ${title}`, 'cmd')
-  const body = String(script || '').trimEnd()
-  if (!body) return
-  for (const line of body.split('\n')) appendLog(job, `  ${line}`, 'cmd')
-}
-
-function wrapWithMarker(script) {
-  return `set -o pipefail\n${script}\nOJ_RC=$?\necho "${EVERYTHING_EXIT}$OJ_RC"\nexit $OJ_RC\n`
-}
-
-function extractExitCode(stdout, fallback) {
-  const text = String(stdout || '')
-  const idx = text.lastIndexOf(EVERYTHING_EXIT)
-  if (idx === -1) return fallback ?? 1
-  const code = Number(text.slice(idx + EVERYTHING_EXIT.length).trim().split(/\s/)[0])
-  return Number.isInteger(code) ? code : 1
-}
-
-let logCarry = new WeakMap()
-
-function forward(job, text, stream) {
-  const carry = logCarry.get(job) || ''
-  const merged = carry + text
-  const lines = merged.split('\n')
-  logCarry.set(job, lines.pop() ?? '')
-  for (const line of lines) {
-    // 不把内部退出码标记暴露给用户
-    if (line.startsWith(EVERYTHING_EXIT)) continue
-    appendLog(job, line, stream)
-  }
-}
-
-function flushCarry(job) {
-  const carry = logCarry.get(job)
-  if (carry && !carry.startsWith(EVERYTHING_EXIT)) appendLog(job, carry, 'out')
-  logCarry.delete(job)
-}
-
-function tailOf(text, lines = 6) {
-  return String(text || '')
-    .trim()
-    .split('\n')
-    .slice(-lines)
-    .join('\n')
-}
 
 // 生成 daemon.json：合并已有内容，只覆盖我们管理的键
 function buildDaemonJson(existing, config, autoDns, autoPool) {

@@ -48,6 +48,7 @@ export default function App() {
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [addOpen, setAddOpen] = useState(false)
+  const [appCreateOpen, setAppCreateOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [toasts, setToasts] = useState<ToastItem[]>([])
 
@@ -129,6 +130,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setAddOpen(false)
+        setAppCreateOpen(false)
         setSettingsOpen(false)
       }
     }
@@ -203,7 +205,9 @@ export default function App() {
             <>
               <ActionDock
                 showRefresh={page === 'servers'}
-                onAdd={() => (page === 'servers' ? setAddOpen(true) : toast('应用管理将在后续版本开放'))}
+                title={page === 'apps' ? '应用' : '服务器'}
+                addLabel={page === 'apps' ? '新建' : '添加'}
+                onAdd={() => (page === 'servers' ? setAddOpen(true) : setAppCreateOpen(true))}
                 onRefresh={() => testAll(false)}
               />
               {page === 'servers' ? (
@@ -218,7 +222,14 @@ export default function App() {
                   />
                 ) : null
               ) : (
-                <AppsPage onGoServers={() => setPage('servers')} />
+                <AppsPage
+                  servers={servers}
+                  createOpen={appCreateOpen}
+                  onOpenCreate={() => setAppCreateOpen(true)}
+                  onCloseCreate={() => setAppCreateOpen(false)}
+                  onGoServers={() => setPage('servers')}
+                  onToast={toast}
+                />
               )}
 
               <p className="foot-note">Ourjia PaaS v0.1 · SSH 运维平台</p>

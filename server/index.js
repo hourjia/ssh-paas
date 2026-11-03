@@ -8,6 +8,8 @@ import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
+import { getApps, findApp, createApp, deleteApp, publicApp, saveApps } from './apps.js'
+import { runDeploy, planDeploySteps } from './deploy.js'
 
 const PORT = Number(process.env.PORT) || 8787
 const now = () => new Date().toISOString()
@@ -288,6 +290,58 @@ app.post('/api/servers/:id/init', wrap(async (req, res) => {
         error: job.status === 'failed' ? job.error : null,
       }
       saveServers()
+    }
+  })()
+}))
+
+app.get('/api/apps', wrap((_req, res) => {
+  res.json({ apps: getApps().map(publicApp) })
+}))
+
+app.post('/api/apps', wrap((req, res) => {
+  const server = findServer(String(req.body?.serverId || ''))
+  if (!server) throw badRequest('服务器不存在')
+  const rec = createApp({ ...req.body, serverId: server.id })
+  res.json({ app: publicApp(rec) })
+}))
+
+app.delete('/api/apps/:id', wrap((req, res) => {
+  const rec = findApp(req.params.id)
+  if (!rec) throw badRequest('应用不存在')
+  if (jobLocked(rec.serverId)) throw badRequest('该服务器有进行中的任务，请等待完成后再删除')
+  deleteApp(rec.id)
+  res.json({ ok: true })
+}))
+
+app.post('/api/apps/:id/deploy', wrap(async (req, res) => {
+  const rec = findApp(req.params.id)
+  if (!rec) throw badRequest('应用不存在')
+  const server = findServer(rec.serverId)
+  if (!server) throw badRequest('应用所属服务器不存在')
+  if (jobLocked(server.id)) throw badRequest('该服务器已有进行中的任务，请等待完成')
+
+  const job = createJob(server.id, 'deploy', planDeploySteps())
+  if (!acquireLock(server.id, job.id)) throw badRequest('该服务器已有进行中的任务')
+  rec.status = 'deploying'
+  rec.lastError = null
+  saveApps()
+  res.json({ job: snapshot(job), app: publicApp(rec) })
+
+  ;(async () => {
+    let conn
+    try {
+      conn = await connectSSH(serverCredentials(server))
+      await runDeploy(job, conn, server, rec)
+    } catch (err) {
+      const { setJobState, appendLog } = await import('./jobs.js')
+      appendLog(job, `连接失败：${err.message}`, 'err')
+      rec.status = 'failed'
+      rec.lastError = err.message
+      saveApps()
+      setJobState(job, 'failed', err.message)
+    } finally {
+      conn?.end()
+      releaseLock(server.id)
     }
   })()
 }))

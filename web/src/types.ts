@@ -117,6 +117,34 @@ export interface AddServerPayload {
   keyAuth: boolean
 }
 
+export interface AppDelivery {
+  version: string | null
+  tag: string | null
+  commit: string | null
+  deployedAt: string | null
+}
+
+export interface AppRecord {
+  id: string
+  serverId: string
+  name: string
+  domain: string
+  kind: 'sample'
+  runtime: { baseImage: string; port: number; healthPath: string }
+  status: 'idle' | 'deploying' | 'running' | 'failed'
+  warning: string | null
+  lastError: string | null
+  delivery: AppDelivery
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateAppPayload {
+  serverId: string
+  name: string
+  domain: string
+}
+
 export interface Settings {
   theme: 'light' | 'dark'
   glass: number

@@ -614,3 +614,23 @@ select{cursor:pointer}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}
 }
+
+/* 应用页 */
+.apps-page{display:flex;flex-direction:column;gap:18px}
+.apps-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.apps-title{margin:2px 0 4px;font-family:var(--font-display);font-size:26px;letter-spacing:-.02em}
+.apps-sub{margin:0;font-size:13px;color:var(--text-3)}
+.app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.app-card{padding:18px 20px;display:flex;flex-direction:column;gap:14px;border-radius:22px}
+.app-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.app-name{margin:0 0 4px;font-size:17px}
+.app-domain{font-size:12.5px;color:var(--accent);text-decoration:none}
+.app-domain:hover{text-decoration:underline}
+.app-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0}
+.app-meta dt{font-size:11px;color:var(--text-3);margin-bottom:3px}
+.app-meta dd{margin:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-note{margin:0;font-size:12.5px;line-height:1.6;padding:8px 10px;border-radius:10px}
+.app-note.warn{color:var(--st-orphan);background:var(--st-orphan-bg)}
+.app-note.err{color:var(--st-err);background:var(--st-err-bg)}
+.app-actions{display:flex;gap:8px;margin-top:auto}
+@media (max-width:640px){.app-meta{grid-template-columns:repeat(2,minmax(0,1fr))}}

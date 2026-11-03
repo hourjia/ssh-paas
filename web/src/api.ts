@@ -1,6 +1,8 @@
 import type {
   AddServerPayload,
+  AppRecord,
   CheckReport,
+  CreateAppPayload,
   JobSnapshot,
   ServerConfig,
   ServerRecord,
@@ -64,6 +66,28 @@ export function startInit(id: string, config: ServerConfig) {
 
 export function getJob(id: string) {
   return request<{ job: JobSnapshot }>(`/api/jobs/${id}`)
+}
+
+export function listApps() {
+  return request<{ apps: AppRecord[] }>('/api/apps')
+}
+
+export function createApp(payload: CreateAppPayload) {
+  return request<{ app: AppRecord }>('/api/apps', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteApp(id: string) {
+  return request<{ ok: boolean }>(`/api/apps/${id}`, { method: 'DELETE' })
+}
+
+export function deployApp(id: string) {
+  return request<{ job: JobSnapshot; app: AppRecord }>(`/api/apps/${id}/deploy`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
 }
 
 const TERMINAL = new Set(['done', 'failed', 'interrupted'])

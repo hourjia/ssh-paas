@@ -3,11 +3,13 @@ import { PlusIcon, RefreshIcon } from '../icons'
 
 interface ActionDockProps {
   showRefresh: boolean
+  title?: string
+  addLabel?: string
   onAdd: () => void
   onRefresh: () => void
 }
 
-export function ActionDock({ showRefresh, onAdd, onRefresh }: ActionDockProps) {
+export function ActionDock({ showRefresh, title = '服务器', addLabel = '添加', onAdd, onRefresh }: ActionDockProps) {
   const [spinning, setSpinning] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -21,7 +23,7 @@ export function ActionDock({ showRefresh, onAdd, onRefresh }: ActionDockProps) {
   return (
     <div className="toolbar">
       <div className="toolbar-title">
-        <h1>服务器</h1>
+        <h1>{title}</h1>
       </div>
       <div className="toolbar-actions">
         <button className="btn ghost toolbar-btn" onClick={handleRefresh} disabled={!showRefresh}>
@@ -30,7 +32,7 @@ export function ActionDock({ showRefresh, onAdd, onRefresh }: ActionDockProps) {
         </button>
         <button className="btn primary toolbar-btn" onClick={onAdd}>
           <PlusIcon />
-          添加
+          {addLabel}
         </button>
       </div>
     </div>
