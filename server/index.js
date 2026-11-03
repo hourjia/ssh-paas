@@ -3,12 +3,12 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { encrypt, decrypt, getServers, saveServers, findServer, publicServer } from './store.js'
-import { connectSSH, probeServer, generateKeyPair, installPublicKey } from './ssh.js'
+import { connectSSH, probeServer, generateKeyPair, installPublicKey, execScript } from './ssh.js'
 import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js'
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
-import { getApps, findApp, createApp, deleteApp, publicApp, saveApps } from './apps.js'
+import { getApps, findApp, createApp, deleteApp, publicApp, saveApps, buildCleanupScript } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
 
 const PORT = Number(process.env.PORT) || 8787
@@ -305,12 +305,31 @@ app.post('/api/apps', wrap((req, res) => {
   res.json({ app: publicApp(rec) })
 }))
 
-app.delete('/api/apps/:id', wrap((req, res) => {
+app.delete('/api/apps/:id', wrap(async (req, res) => {
   const rec = findApp(req.params.id)
   if (!rec) throw badRequest('应用不存在')
   if (jobLocked(rec.serverId)) throw badRequest('该服务器有进行中的任务，请等待完成后再删除')
+
+  const cleanup = req.query.cleanup === '1'
+  const removeData = req.query.data === '1'
+  let detail = null
+
+  if (cleanup) {
+    const server = findServer(rec.serverId)
+    if (!server) throw badRequest('应用所属服务器不存在，无法清理')
+    const script = buildCleanupScript(rec, removeData)
+    await withConnection(server, async (conn) => {
+      const result = await execScript(conn, script, { timeoutMs: 120000 })
+      if (result.code !== 0) {
+        const message = result.stderr.trim() || `退出码 ${result.code}`
+        throw new Error(`服务器清理失败：${message}`)
+      }
+      detail = result.stdout.trim()
+    })
+  }
+
   deleteApp(rec.id)
-  res.json({ ok: true })
+  res.json({ ok: true, detail })
 }))
 
 app.post('/api/apps/:id/deploy', wrap(async (req, res) => {

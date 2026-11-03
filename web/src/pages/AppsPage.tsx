@@ -64,6 +64,11 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [creating, setCreating] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
+  const [deleteTarget, setDeleteTarget] = useState<AppRecord | null>(null)
+  const [cleanup, setCleanup] = useState(true)
+  const [removeData, setRemoveData] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
   const load = useCallback(async () => {
     try {
       const { apps: list } = await api.listApps()
@@ -131,20 +136,26 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     [attachStream, busyId, load, onToast],
   )
 
-  const remove = useCallback(
-    async (app: AppRecord) => {
-      if (busyId) return
-      if (!window.confirm(`删除应用「${app.name}」？服务器上的容器与目录不会自动清理。`)) return
-      try {
-        await api.deleteApp(app.id)
-        setApps((prev) => prev.filter((a) => a.id !== app.id))
-        onToast('应用已删除')
-      } catch (e) {
-        onToast(e instanceof Error ? e.message : '删除失败')
-      }
-    },
-    [busyId, onToast],
-  )
+  const askRemove = useCallback((app: AppRecord) => {
+    setDeleteTarget(app)
+    setCleanup(true)
+    setRemoveData(false)
+  }, [])
+
+  const confirmRemove = useCallback(async () => {
+    if (!deleteTarget || deleting) return
+    setDeleting(true)
+    try {
+      await api.deleteApp(deleteTarget.id, { cleanup, data: cleanup && removeData })
+      setApps((prev) => prev.filter((a) => a.id !== deleteTarget.id))
+      onToast(cleanup ? '应用及服务器资源已清理' : '应用记录已删除，服务器资源保留')
+      setDeleteTarget(null)
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : '删除失败')
+    } finally {
+      setDeleting(false)
+    }
+  }, [cleanup, deleteTarget, deleting, onToast, removeData])
 
   const setField = (key: keyof typeof EMPTY_FORM, value: string) => {
     setForm((cur) => ({ ...cur, [key]: value }))
@@ -324,7 +335,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                       </>
                     )}
                   </button>
-                  <button className="btn ghost sm" onClick={() => remove(app)} disabled={deploying}>
+                  <button className="btn ghost sm" onClick={() => askRemove(app)} disabled={deploying}>
                     删除
                   </button>
                 </div>
@@ -494,6 +505,59 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             </button>
           </div>
         </div>
+      </Modal>
+
+      <Modal open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} title="删除应用">
+        {deleteTarget && (
+          <div className="form-grid">
+            <p className="confirm-lede">
+              删除 <strong>{deleteTarget.name}</strong>（{deleteTarget.domain || deleteTarget.service?.alias || deleteTarget.id}）？
+            </p>
+
+            <label className="check-row">
+              <input type="checkbox" checked={cleanup} onChange={(e) => setCleanup(e.target.checked)} />
+              <span>
+                同时停止容器并删除服务器上的部署目录
+                <code>/srv/apps/{deleteTarget.id}</code>
+              </span>
+            </label>
+
+            {deleteTarget.kind === 'service' && (
+              <label className={`check-row${removeData ? ' danger' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={removeData}
+                  disabled={!cleanup}
+                  onChange={(e) => setRemoveData(e.target.checked)}
+                />
+                <span>
+                  同时删除数据目录 <code>{deleteTarget.service?.dataDir}</code>（不可恢复）
+                </span>
+              </label>
+            )}
+
+            <p className="form-hint">
+              {cleanup
+                ? '容器会先 docker compose down，再删除部署目录；共享服务的数据目录默认保留。'
+                : '仅删除本地记录，服务器上的容器和目录会保留，需要你手工清理。'}
+            </p>
+
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                取消
+              </button>
+              <button className="btn danger" onClick={confirmRemove} disabled={deleting}>
+                {deleting ? (
+                  <>
+                    <span className="spinner" /> 删除中…
+                  </>
+                ) : (
+                  '删除'
+                )}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   )

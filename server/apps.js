@@ -233,3 +233,27 @@ export function appPaths(app) {
     dir: `/srv/apps/${app.id}`,
   }
 }
+
+// 删除应用时在服务器上执行的清理脚本：容器、部署目录、示例交付仓库，数据目录需显式授权
+export function buildCleanupScript(app, removeData = false) {
+  const { dir, repo } = appPaths(app)
+  const lines = [
+    'set -e',
+    `DIR=${dir}`,
+    'if [ -d "$DIR" ]; then',
+    '  (cd "$DIR" && docker compose down --remove-orphans) || true',
+    'fi',
+    `docker rm -f ourjia_${app.id} >/dev/null 2>&1 || true`,
+    'rm -rf "$DIR"',
+  ]
+  if (app.kind === 'sample') lines.push(`rm -rf ${repo}`)
+  if (removeData && app.kind === 'service' && app.service?.dataDir) {
+    const dataDir = app.service.dataDir
+    if (!/^\/srv\/(data|shared)\/[A-Za-z0-9._/-]+$/.test(dataDir) || dataDir.includes('..')) {
+      throw bad('数据目录不合法，已拒绝删除')
+    }
+    lines.push(`rm -rf ${dataDir}`)
+  }
+  lines.push('echo "已清理容器与部署目录"')
+  return lines.join('\n')
+}

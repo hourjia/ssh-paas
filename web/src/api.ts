@@ -79,8 +79,12 @@ export function createApp(payload: CreateAppPayload) {
   })
 }
 
-export function deleteApp(id: string) {
-  return request<{ ok: boolean }>(`/api/apps/${id}`, { method: 'DELETE' })
+export function deleteApp(id: string, opts: { cleanup?: boolean; data?: boolean } = {}) {
+  const q = new URLSearchParams()
+  if (opts.cleanup) q.set('cleanup', '1')
+  if (opts.data) q.set('data', '1')
+  const suffix = q.toString() ? `?${q.toString()}` : ''
+  return request<{ ok: boolean; detail?: string }>(`/api/apps/${id}${suffix}`, { method: 'DELETE' })
 }
 
 export function deployApp(id: string) {
