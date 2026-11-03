@@ -543,6 +543,8 @@ function buildTraefikCompose(config) {
   if (acme.ca !== 'none') {
     acmeArgs.push('--certificatesresolvers.le.acme.email=${ACME_EMAIL}')
     acmeArgs.push('--certificatesresolvers.le.acme.storage=/acme/acme.json')
+    // 境内服务器访问 LE API 偶发超过默认 30s，放宽响应头超时以减少签发失败
+    acmeArgs.push('--certificatesresolvers.le.acme.clientResponseHeaderTimeout=60s')
     acmeArgs.push('--certificatesresolvers.le.acme.httpchallenge=true')
     acmeArgs.push('--certificatesresolvers.le.acme.httpchallenge.entrypoint=web')
     if (acme.ca === 'letsencrypt-staging') {

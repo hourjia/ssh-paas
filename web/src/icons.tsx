@@ -23,6 +23,27 @@ export function GridIcon({ className }: IconProps) {
   )
 }
 
+export function ContainerIcon({ className }: IconProps) {
+  return (
+    <Icon className={className}>
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M5.4 3.2h13.2c1.2 0 2.2 1 2.2 2.2v2.2H3.2V5.4c0-1.2 1-2.2 2.2-2.2Zm-2.2 6.2h17.6v9.4c0 1.2-1 2.2-2.2 2.2H5.4c-1.2 0-2.2-1-2.2-2.2V9.4Z"
+      />
+    </Icon>
+  )
+}
+
+export function DeployIcon({ className }: IconProps) {
+  return (
+    <Icon className={className}>
+      <path d="M12 2.6 17.8 8.4h-3.5v6.1H9.7V8.4H6.2L12 2.6Z" />
+      <rect x="4" y="17.2" width="16" height="3.2" rx="1.6" />
+    </Icon>
+  )
+}
+
 export function ServerIcon({ className }: IconProps) {
   return (
     <Icon className={className}>

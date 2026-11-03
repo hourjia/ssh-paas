@@ -129,8 +129,11 @@ export interface AppRecord {
   serverId: string
   name: string
   domain: string
-  kind: 'sample'
-  runtime: { baseImage: string; port: number; healthPath: string }
+  image: string | null
+  notes: string | null
+  kind: 'sample' | 'image'
+  envKeys: string[]
+  runtime: { baseImage?: string; port: number; healthPath: string }
   status: 'idle' | 'deploying' | 'running' | 'failed'
   warning: string | null
   lastError: string | null
@@ -142,7 +145,11 @@ export interface AppRecord {
 export interface CreateAppPayload {
   serverId: string
   name: string
+  image: string
   domain: string
+  port: number
+  env: string
+  notes: string
 }
 
 export interface Settings {

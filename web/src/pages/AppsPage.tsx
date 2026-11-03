@@ -3,7 +3,7 @@ import * as api from '../api'
 import type { AppRecord, ServerRecord } from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
-import { GridIcon, RefreshIcon } from '../icons'
+import { ContainerIcon, DeployIcon, PlusIcon } from '../icons'
 
 interface AppsPageProps {
   servers: ServerRecord[]
@@ -21,8 +21,13 @@ const STATUS: Record<AppRecord['status'], { cls: string; label: string }> = {
   failed: { cls: 'st-err', label: '部署失败' },
 }
 
-function hostOf(domain: string) {
-  return domain.startsWith('http') ? domain : `https://${domain}`
+const EMPTY_FORM = {
+  name: '',
+  image: '',
+  domain: '',
+  port: '80',
+  env: '',
+  notes: '',
 }
 
 export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onGoServers, onToast }: AppsPageProps) {
@@ -33,8 +38,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [logTitle, setLogTitle] = useState('部署 · 终端输出')
   const unsubRef = useRef<(() => void) | null>(null)
 
-  const [name, setName] = useState('')
-  const [domain, setDomain] = useState('')
+  const [form, setForm] = useState(EMPTY_FORM)
   const [serverId, setServerId] = useState('')
   const [creating, setCreating] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
@@ -121,6 +125,10 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     [busyId, onToast],
   )
 
+  const setField = (key: keyof typeof EMPTY_FORM, value: string) => {
+    setForm((cur) => ({ ...cur, [key]: value }))
+  }
+
   const submit = useCallback(async () => {
     if (creating) return
     if (!serverId) {
@@ -130,10 +138,17 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setCreating(true)
     setFormError(null)
     try {
-      const { app } = await api.createApp({ serverId, name: name.trim(), domain: domain.trim() })
+      const { app } = await api.createApp({
+        serverId,
+        name: form.name.trim(),
+        image: form.image.trim(),
+        domain: form.domain.trim(),
+        port: Number(form.port) || 80,
+        env: form.env,
+        notes: form.notes.trim(),
+      })
       setApps((prev) => [app, ...prev])
-      setName('')
-      setDomain('')
+      setForm(EMPTY_FORM)
       onCloseCreate()
       onToast('应用已创建，可以开始部署')
     } catch (e) {
@@ -141,7 +156,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     } finally {
       setCreating(false)
     }
-  }, [creating, domain, name, onCloseCreate, onToast, serverId])
+  }, [creating, form, onCloseCreate, onToast, serverId])
 
   return (
     <div className="apps-page">
@@ -149,10 +164,10 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         <div>
           <p className="eyebrow">Apps</p>
           <h2 className="apps-title">应用</h2>
-          <p className="apps-sub">部署后由 Traefik 按域名路由并自动申请证书。</p>
+          <p className="apps-sub">填写镜像与域名，部署后由 Traefik 自动路由并申请证书。</p>
         </div>
         <button className="btn primary" onClick={onOpenCreate} disabled={!servers.length}>
-          <GridIcon /> 新建示例应用
+          <PlusIcon /> 新建应用
         </button>
       </div>
 
@@ -165,17 +180,17 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       {loaded && apps.length === 0 && (
         <div className="empty glass-lite reveal">
           <div className="empty-icon">
-            <GridIcon />
+            <ContainerIcon />
           </div>
           <h3>还没有应用</h3>
           <p>
             {servers.length
-              ? '先创建一个示例应用，跑通构建、交付、部署与 HTTPS 的完整链路。'
+              ? '创建一个应用，填好镜像地址与域名，即可部署到服务器并通过 HTTPS 访问。'
               : '先到「服务器」页添加并初始化一台服务器。'}
           </p>
           {servers.length ? (
             <button className="btn primary" onClick={onOpenCreate}>
-              新建示例应用
+              <PlusIcon /> 新建应用
             </button>
           ) : (
             <button className="btn ghost" onClick={onGoServers}>
@@ -195,7 +210,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                 <div className="app-card-head">
                   <div>
                     <h3 className="app-name">{app.name}</h3>
-                    <a className="app-domain mono" href={hostOf(app.domain)} target="_blank" rel="noreferrer">
+                    <a className="app-domain mono" href={`https://${app.domain}`} target="_blank" rel="noreferrer">
                       {app.domain}
                     </a>
                   </div>
@@ -211,8 +226,10 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                     <dd>{serverName(app.serverId)}</dd>
                   </div>
                   <div>
-                    <dt>版本</dt>
-                    <dd className="mono">{app.delivery.version || '—'}</dd>
+                    <dt>镜像</dt>
+                    <dd className="mono" title={app.image || undefined}>
+                      {app.image || '示例构建'}
+                    </dd>
                   </div>
                   <div>
                     <dt>部署时间</dt>
@@ -220,6 +237,8 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                   </div>
                 </dl>
 
+                {app.notes && <p className="app-notes">{app.notes}</p>}
+                {app.envKeys.length > 0 && <p className="app-notes">环境变量：{app.envKeys.join('、')}</p>}
                 {app.warning && <p className="app-note warn">{app.warning}</p>}
                 {app.lastError && <p className="app-note err">{app.lastError}</p>}
 
@@ -231,7 +250,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                       </>
                     ) : (
                       <>
-                        <RefreshIcon /> {app.status === 'running' ? '重新部署' : '部署'}
+                        <DeployIcon /> {app.status === 'running' ? '重新部署' : '部署'}
                       </>
                     )}
                   </button>
@@ -252,12 +271,23 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         </section>
       )}
 
-      <Modal open={createOpen} onClose={onCloseCreate} title="新建示例应用">
+      <Modal open={createOpen} onClose={onCloseCreate} title="新建应用">
         <div className="form-grid">
           <div className="field">
             <label>应用名称</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 示例站点" />
+            <input value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="例如 官网前端" />
           </div>
+
+          <div className="field">
+            <label>Docker 镜像地址</label>
+            <input
+              value={form.image}
+              onChange={(e) => setField('image', e.target.value)}
+              placeholder="registry.example.com/team/app:v1"
+            />
+            <p className="form-hint">服务器会直接拉取这个镜像，私有仓库需提前在服务器上 docker login。</p>
+          </div>
+
           <div className="field">
             <label>服务器</label>
             <select value={serverId} onChange={(e) => setServerId(e.target.value)}>
@@ -269,13 +299,46 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
               ))}
             </select>
           </div>
-          <div className="field">
-            <label>域名</label>
-            <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="demo.example.com" />
-            <p className="form-hint">
-              解析由你自行配置，平台只按此域名生成 Traefik 路由并申请证书；未解析时 HTTPS 会显示警告。
-            </p>
+
+          <div className="field-row-split">
+            <div className="field">
+              <label>域名</label>
+              <input value={form.domain} onChange={(e) => setField('domain', e.target.value)} placeholder="app.example.com" />
+            </div>
+            <div className="field">
+              <label>容器端口</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={form.port}
+                onChange={(e) => setField('port', e.target.value)}
+              />
+            </div>
           </div>
+          <p className="form-hint">域名解析由你自行配置；未解析时 HTTPS 会显示警告，不影响容器启动。</p>
+
+          <div className="field">
+            <label>环境变量（可选）</label>
+            <textarea
+              rows={4}
+              value={form.env}
+              onChange={(e) => setField('env', e.target.value)}
+              placeholder={'每行一个 KEY=VALUE\nNODE_ENV=production\nDATABASE_URL=postgres://...'}
+            />
+            <p className="form-hint">保存时整体加密，部署时写入容器；日志中只显示变量名。</p>
+          </div>
+
+          <div className="field">
+            <label>备注（可选）</label>
+            <textarea
+              rows={2}
+              value={form.notes}
+              onChange={(e) => setField('notes', e.target.value)}
+              placeholder="用途、负责人、上线注意事项…"
+            />
+          </div>
+
           {formError && <div className="form-error">{formError}</div>}
           <div className="modal-foot">
             <button className="btn ghost" onClick={onCloseCreate} disabled={creating}>

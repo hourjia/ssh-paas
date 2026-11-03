@@ -634,3 +634,4 @@ select{cursor:pointer}
 .app-note.err{color:var(--st-err);background:var(--st-err-bg)}
 .app-actions{display:flex;gap:8px;margin-top:auto}
 @media (max-width:640px){.app-meta{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.app-notes{margin:0;font-size:12.5px;line-height:1.6;color:var(--text-3);overflow-wrap:anywhere}

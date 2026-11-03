@@ -1,12 +1,19 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { decrypt, encrypt } from './store.js'
 
 const DATA_DIR = path.join(import.meta.dirname, 'data')
 const APPS_FILE = path.join(DATA_DIR, 'apps.json')
 
 const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i
+// 允许 registry:port/namespace/name:tag 与 @sha256:digest
+const IMAGE_RE =
+  /^(?:[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(?::\d{1,5})?\/)?(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/)*[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[\w][\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const NAME_MAX = 40
+const NOTES_MAX = 200
+const ENV_MAX = 50
 
 let apps = null
 
@@ -42,6 +49,41 @@ function bad(message) {
   return err
 }
 
+function parseEnvInput(raw) {
+  if (!raw) return []
+  const lines = Array.isArray(raw) ? raw : String(raw).split(/\r?\n/)
+  const out = []
+  const seen = new Set()
+  for (const line of lines) {
+    const text = String(line).trim()
+    if (!text || text.startsWith('#')) continue
+    const idx = text.indexOf('=')
+    if (idx <= 0) throw bad(`环境变量格式错误：${text}（应为 KEY=VALUE）`)
+    const key = text.slice(0, idx).trim()
+    const value = text.slice(idx + 1)
+    if (!ENV_KEY_RE.test(key)) throw bad(`环境变量名不合法：${key}`)
+    if (seen.has(key)) throw bad(`环境变量重复：${key}`)
+    if (value.length > 4096) throw bad(`环境变量 ${key} 的值过长`)
+    seen.add(key)
+    out.push({ key, value })
+  }
+  if (out.length > ENV_MAX) throw bad(`环境变量最多 ${ENV_MAX} 个`)
+  return out
+}
+
+// 环境变量可能含密钥，落盘前整体加密
+export function readEnv(app) {
+  if (!app?.envEnc) return {}
+  const raw = decrypt(app.envEnc)
+  if (!raw) throw bad('环境变量解密失败，请检查 server/data/.secret 是否被替换')
+  try {
+    const list = JSON.parse(raw)
+    return Object.fromEntries(list.map((e) => [e.key, e.value]))
+  } catch {
+    throw bad('环境变量数据损坏')
+  }
+}
+
 export function normalizeAppInput(input = {}) {
   const name = String(input.name || '').trim()
   if (!name) throw bad('应用名称不能为空')
@@ -54,11 +96,21 @@ export function normalizeAppInput(input = {}) {
   if (!domain) throw bad('域名不能为空')
   if (!DOMAIN_RE.test(domain)) throw bad('域名格式不合法，例如 demo.example.com')
 
-  return { name, serverId, domain }
+  const image = String(input.image || '').trim()
+  if (!image) throw bad('Docker 镜像地址不能为空')
+  if (!IMAGE_RE.test(image)) throw bad('镜像地址格式不合法，例如 registry.example.com/team/app:v1')
+
+  const portRaw = input.port === undefined || input.port === null || input.port === '' ? 80 : Number(input.port)
+  if (!Number.isInteger(portRaw) || portRaw < 1 || portRaw > 65535) throw bad('容器端口需为 1-65535')
+
+  const notes = String(input.notes || '').trim()
+  if (notes.length > NOTES_MAX) throw bad(`备注不能超过 ${NOTES_MAX} 个字符`)
+
+  return { name, serverId, domain, image, port: portRaw, notes, env: parseEnvInput(input.env) }
 }
 
 export function createApp(input) {
-  const { name, serverId, domain } = normalizeAppInput(input)
+  const { name, serverId, domain, image, port, notes, env } = normalizeAppInput(input)
   if (load().some((a) => a.serverId === serverId && a.domain === domain)) {
     throw bad('该服务器上已有应用使用这个域名')
   }
@@ -69,9 +121,11 @@ export function createApp(input) {
     serverId,
     name,
     domain,
-    kind: 'sample',
-    runtime: { baseImage: 'nginx:alpine', port: 80, healthPath: '/' },
-    source: { repo: null, ref: null, buildCommand: null, distDir: '.' },
+    image,
+    notes,
+    kind: 'image',
+    envEnc: env.length ? encrypt(JSON.stringify(env)) : null,
+    runtime: { port, healthPath: '/' },
     delivery: { version: null, tag: null, commit: null, deployedAt: null },
     status: 'idle',
     warning: null,
@@ -93,12 +147,24 @@ export function deleteApp(id) {
 }
 
 export function publicApp(app) {
+  let envKeys = []
+  if (app.envEnc) {
+    try {
+      const raw = decrypt(app.envEnc)
+      if (raw) envKeys = JSON.parse(raw).map((e) => e.key)
+    } catch {
+      envKeys = []
+    }
+  }
   return {
     id: app.id,
     serverId: app.serverId,
     name: app.name,
     domain: app.domain,
+    image: app.image || null,
+    notes: app.notes || null,
     kind: app.kind,
+    envKeys,
     runtime: app.runtime,
     status: app.status,
     warning: app.warning,

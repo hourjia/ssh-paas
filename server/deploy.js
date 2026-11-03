@@ -4,10 +4,10 @@ import path from 'node:path'
 import https from 'node:https'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { sftpUpload } from './ssh.js'
+import { execScript, sftpUpload, sftpWrite } from './ssh.js'
 import { appendLog, updateStep, setJobState } from './jobs.js'
 import { runStep, flushCarry } from './step-runner.js'
-import { appPaths, saveApps } from './apps.js'
+import { appPaths, readEnv, saveApps } from './apps.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -18,7 +18,15 @@ async function git(cwd, args) {
   return { stdout, stderr }
 }
 
-export function planDeploySteps() {
+export function planDeploySteps(app) {
+  if (app?.kind === 'image') {
+    return [
+      { id: 'config', title: '生成并上传部署配置' },
+      { id: 'pull', title: '拉取镜像' },
+      { id: 'deploy', title: '启动容器' },
+      { id: 'health', title: '健康检查' },
+    ]
+  }
   return [
     { id: 'build', title: '本地构建交付包' },
     { id: 'deliver', title: '更新交付仓库' },
@@ -32,26 +40,25 @@ function makeVersion() {
   return `v${iso.replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}`
 }
 
-function buildCompose(app, version) {
+function labelLines(app) {
   const id = app.id
-  const domain = app.domain
   const port = app.runtime?.port || 80
   return [
-    'services:',
-    '  app:',
-    '    build: .',
-    `    container_name: ourjia_${id}`,
-    '    restart: unless-stopped',
     '    labels:',
     '      - "traefik.enable=true"',
     '      - "traefik.docker.network=proxy-net"',
-    `      - "traefik.http.routers.${id}.rule=Host(\`${domain}\`)"`,
+    `      - "traefik.http.routers.${id}.rule=Host(\`${app.domain}\`)"`,
     `      - "traefik.http.routers.${id}.entrypoints=websecure"`,
     `      - "traefik.http.routers.${id}.tls=true"`,
     `      - "traefik.http.routers.${id}.tls.certresolver=le"`,
     `      - "traefik.http.services.${id}.loadbalancer.server.port=${port}"`,
     `      - "deploy.app=${id}"`,
-    `      - "deploy.version=${version}"`,
+    `      - "deploy.image=${app.image || ''}"`,
+  ]
+}
+
+function networkLines() {
+  return [
     '    networks:',
     '      - proxy-net',
     '      - shared-net',
@@ -61,6 +68,40 @@ function buildCompose(app, version) {
     '  shared-net:',
     '    external: true',
     '',
+  ]
+}
+
+function buildImageCompose(app, env) {
+  const lines = [
+    'services:',
+    '  app:',
+    `    image: ${JSON.stringify(app.image)}`,
+    `    container_name: ourjia_${app.id}`,
+    '    restart: unless-stopped',
+    ...labelLines(app),
+  ]
+  const keys = Object.keys(env)
+  if (keys.length) {
+    lines.push('    environment:')
+    for (const key of keys) {
+      // Compose 会对 $ 做变量插值，先转义成 $$
+      const value = String(env[key]).replace(/\$/g, '$$$$')
+      lines.push(`      ${key}: ${JSON.stringify(value)}`)
+    }
+  }
+  lines.push(...networkLines())
+  return lines.join('\n')
+}
+
+function buildSampleCompose(app, version) {
+  return [
+    'services:',
+    '  app:',
+    '    build: .',
+    `    container_name: ourjia_${app.id}`,
+    '    restart: unless-stopped',
+    ...labelLines(app),
+    ...networkLines(),
   ].join('\n')
 }
 
@@ -104,7 +145,7 @@ function writeSampleProject(workdir, app, version) {
   fs.mkdirSync(distDir, { recursive: true })
   fs.writeFileSync(path.join(distDir, 'index.html'), sampleHtml(app, version))
   fs.writeFileSync(path.join(workdir, 'Dockerfile'), `FROM ${app.runtime.baseImage}\nCOPY dist/ /usr/share/nginx/html\n`)
-  fs.writeFileSync(path.join(workdir, 'docker-compose.yml'), buildCompose(app, version))
+  fs.writeFileSync(path.join(workdir, 'docker-compose.yml'), buildSampleCompose(app, version))
   fs.writeFileSync(
     path.join(workdir, 'release.json'),
     `${JSON.stringify(
@@ -142,7 +183,7 @@ function buildDeliverScript(app, bundleRemote) {
   ].join('\n')
 }
 
-function buildDeployScript(app, tag) {
+function buildCheckoutScript(app, tag) {
   const { repo, dir } = appPaths(app)
   return [
     'set -e',
@@ -157,8 +198,18 @@ function buildDeployScript(app, tag) {
     'git -C "$DIR" fetch --tags origin',
     'git -C "$DIR" checkout -f "$TAG"',
     'echo "当前版本：$(git -C "$DIR" describe --tags --always)"',
-    'cd "$DIR"',
-    'docker compose up -d --build --remove-orphans',
+  ].join('\n')
+}
+
+function buildUpScript(app, build) {
+  const { dir } = appPaths(app)
+  const lines = [
+    'set -e',
+    `cd ${dir}`,
+  ]
+  if (build) lines.push('docker compose up -d --build --remove-orphans')
+  else lines.push('docker compose up -d --remove-orphans')
+  lines.push(
     'docker compose ps',
     'cid=$(docker compose ps -q app)',
     'state=missing',
@@ -173,7 +224,13 @@ function buildDeployScript(app, tag) {
     '  fi',
     'done',
     'echo "容器状态：$state"',
-  ].join('\n')
+  )
+  return lines.join('\n')
+}
+
+function buildPullScript(app) {
+  const { dir } = appPaths(app)
+  return ['set -e', `cd ${dir}`, 'docker compose pull'].join('\n')
 }
 
 function buildHealthScript(app) {
@@ -231,17 +288,78 @@ function deployTips(app, server) {
     `查看应用日志：${ssh} 'cd /srv/apps/${app.id} && docker compose logs --tail 100'`,
     `确认容器状态：${ssh} 'docker ps --filter name=ourjia_${app.id}'`,
     `证书与路由：${ssh} 'docker logs --tail 100 traefik'`,
+    app.kind === 'image'
+      ? `镜像拉取失败时先在服务器上验证：docker pull ${app.image}（私有仓库需 docker login）`
+      : `交付仓库：${ssh} 'git -C /srv/git/${app.id}.git tag'`,
     `域名 ${app.domain} 需要解析到 ${server.host}，否则 Let's Encrypt 无法完成 HTTP-01 校验。`,
   ]
 }
 
-export async function runDeploy(job, conn, server, app) {
-  setJobState(job, 'running')
+function maskedCompose(compose) {
+  return compose.replace(/^(\s{6}[A-Za-z_][A-Za-z0-9_]*: ).*$/gm, '$1"***"')
+}
+
+async function deployImage(job, conn, app) {
+  const { dir } = appPaths(app)
+  const env = readEnv(app)
+  const port = app.runtime.port
+
+  // 1. 生成并上传部署配置
+  updateStep(job, 'config', { status: 'running', startedAt: new Date().toISOString() })
+  job.currentStep = 'config'
+  appendLog(job, `镜像 ${app.image} → 容器端口 ${port}`, 'note')
+  appendLog(job, `域名 ${app.domain}`, 'note')
+  if (Object.keys(env).length) {
+    appendLog(job, `环境变量：${Object.keys(env).join('、')}（值已隐藏）`, 'note')
+  } else {
+    appendLog(job, '未配置环境变量', 'note')
+  }
+  await execScript(conn, `mkdir -p ${dir} && chmod 700 ${dir}`, { timeoutMs: 15000 })
+  const compose = buildImageCompose(app, env)
+  await sftpWrite(conn, `${dir}/docker-compose.yml`, compose, 0o600)
+  await sftpWrite(
+    conn,
+    `${dir}/release.json`,
+    `${JSON.stringify(
+      {
+        app: app.id,
+        name: app.name,
+        kind: app.kind,
+        image: app.image,
+        domain: app.domain,
+        port,
+        envKeys: Object.keys(env),
+        deployedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    0o644,
+  )
+  appendLog(job, `$ cat ${dir}/docker-compose.yml（环境变量值已隐藏）`, 'cmd')
+  for (const line of maskedCompose(compose).trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
+  updateStep(job, 'config', { status: 'done', finishedAt: new Date().toISOString() })
+
+  // 2. 拉取镜像
+  await runStep(job, conn, 'pull', buildPullScript(app), 900000, '拉取镜像')
+  flushCarry(job)
+
+  // 3. 启动
+  await runStep(job, conn, 'deploy', buildUpScript(app, false), 300000, '启动容器')
+  flushCarry(job)
+
+  // 4. 健康检查
+  await runStep(job, conn, 'health', buildHealthScript(app), 180000, '经 Traefik 健康检查')
+  flushCarry(job)
+
+  return { version: app.image, commit: null }
+}
+
+async function deploySample(job, conn, app) {
   const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ourjia-deploy-'))
   const version = makeVersion()
   let commit = null
   try {
-    // 1. 本地构建交付包
     updateStep(job, 'build', { status: 'running', startedAt: new Date().toISOString() })
     job.currentStep = 'build'
     appendLog(job, `准备示例应用「${app.name}」 ${version}`, 'note')
@@ -255,38 +373,45 @@ export async function runDeploy(job, conn, server, app) {
     ])
     await git(workdir, ['tag', version])
     commit = (await git(workdir, ['rev-parse', 'HEAD'])).stdout.trim()
-    appendLog(job, `已生成交付包：dist/ + Dockerfile + docker-compose.yml + release.json`, 'note')
+    appendLog(job, '已生成交付包：dist/ + Dockerfile + docker-compose.yml + release.json', 'note')
     appendLog(job, `提交 ${commit.slice(0, 12)}，Tag ${version}`, 'note')
     updateStep(job, 'build', { status: 'done', finishedAt: new Date().toISOString() })
 
-    // 2. 通过 git bundle 更新服务器上的交付仓库（不需要额外 Git 托管与凭据）
     const bundleLocal = path.join(workdir, `${app.id}.bundle`)
     await git(workdir, ['bundle', 'create', bundleLocal, '--all'])
     const bundleRemote = `/tmp/ourjia-${app.id}-${version}.bundle`
     const sizeKb = Math.max(1, Math.round(fs.statSync(bundleLocal).size / 1024))
     appendLog(job, `交付包 ${sizeKb} KB，上传到 ${bundleRemote}…`, 'note')
     await sftpUpload(conn, bundleLocal, bundleRemote, 0o600)
-    await runStep(
-      job, conn, 'deliver',
-      buildDeliverScript(app, bundleRemote),
-      120000,
-      '更新服务器上的交付仓库',
-    )
+    await runStep(job, conn, 'deliver', buildDeliverScript(app, bundleRemote), 120000, '更新服务器上的交付仓库')
     flushCarry(job)
 
-    // 3. 服务器检出并启动
     await runStep(
-      job, conn, 'deploy',
-      buildDeployScript(app, version),
+      job,
+      conn,
+      'deploy',
+      `${buildCheckoutScript(app, version)}\n${buildUpScript(app, true)}`,
       600000,
       '检出 Tag 并构建、启动容器',
     )
     flushCarry(job)
 
-    // 4. 健康检查：本机经 Traefik 必须通；外网 HTTPS 证书作为软检查
     await runStep(job, conn, 'health', buildHealthScript(app), 180000, '经 Traefik 健康检查')
     flushCarry(job)
 
+    return { version, commit }
+  } finally {
+    fs.rmSync(workdir, { recursive: true, force: true })
+  }
+}
+
+export async function runDeploy(job, conn, server, app) {
+  setJobState(job, 'running')
+  try {
+    const result = app.kind === 'image' ? await deployImage(job, conn, app) : await deploySample(job, conn, app)
+    const { version, commit } = result
+
+    // 外网 HTTPS 证书作为软检查：不阻断部署，但记录警告
     appendLog(job, `等待 https://${app.domain} 证书就绪…`, 'note')
     const external = await waitHttps(app.domain, app.runtime.healthPath)
     if (external.ok) {
@@ -336,7 +461,5 @@ export async function runDeploy(job, conn, server, app) {
     saveApps()
     setJobState(job, 'failed', err.message)
     return { ok: false, error: err.message }
-  } finally {
-    fs.rmSync(workdir, { recursive: true, force: true })
   }
 }

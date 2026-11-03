@@ -320,7 +320,7 @@ app.post('/api/apps/:id/deploy', wrap(async (req, res) => {
   if (!server) throw badRequest('应用所属服务器不存在')
   if (jobLocked(server.id)) throw badRequest('该服务器已有进行中的任务，请等待完成')
 
-  const job = createJob(server.id, 'deploy', planDeploySteps())
+  const job = createJob(server.id, 'deploy', planDeploySteps(rec))
   if (!acquireLock(server.id, job.id)) throw badRequest('该服务器已有进行中的任务')
   rec.status = 'deploying'
   rec.lastError = null
