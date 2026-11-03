@@ -73,7 +73,7 @@ else
 fi
 
 # --- 网络 ---
-kv DNS_UPSTREAM "$( (resolvectl status 2>/dev/null | awk '/DNS Servers:/{for(i=3;i<=NF;i++) printf "%s%s", sep, $i; sep=","}') || echo '')"
+kv DNS_UPSTREAM "$( (resolvectl status 2>/dev/null | awk '/DNS Servers:/{for(i=3;i<=NF;i++){printf "%s%s", sep, $i; sep=","}}') || echo '')"
 kv DNS_RESOLV "$(awk '/^nameserver/{printf "%s%s", sep, $2; sep=","}' /etc/resolv.conf 2>/dev/null || echo '')"
 kv IP_ROUTES "$(ip -o -4 route show scope link 2>/dev/null | awk '{print $1}' | paste -sd, - 2>/dev/null || echo '')"
 kv IP_ADDRS "$(ip -o -4 addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|lo)/ {print $4}' | paste -sd, - 2>/dev/null || echo '')"
