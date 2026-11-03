@@ -1,0 +1,3 @@
+# 远端脚本通过 SSH 直接交给 bash 执行，必须保持 LF，避免 Windows 检出后带 CRLF
+*.sh text eol=lf
+.gitattributes text eol=lf

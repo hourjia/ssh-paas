@@ -34,7 +34,7 @@ export function Sidebar({ page, onPage, onSettings }: SidebarProps) {
       <div className="brand">
         <BrandMark className="brand-mark" />
         <div className="brand-text">
-          <strong>Ourjia PaaS</strong>
+          <strong>SSH-PAAS</strong>
           <span>SSH 运维</span>
         </div>
       </div>

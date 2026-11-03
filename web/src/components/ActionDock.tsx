@@ -19,15 +19,20 @@ export function ActionDock({ showRefresh, onAdd, onRefresh }: ActionDockProps) {
   }
 
   return (
-    <div className="action-dock glass sheen">
-      <button className="icon-btn primary" data-tip="添加" aria-label="添加" onClick={onAdd}>
-        <PlusIcon />
-      </button>
-      {showRefresh && (
-        <button className="icon-btn" data-tip="刷新状态" aria-label="刷新状态" onClick={handleRefresh}>
+    <div className="toolbar">
+      <div className="toolbar-title">
+        <h1>服务器</h1>
+      </div>
+      <div className="toolbar-actions">
+        <button className="btn ghost toolbar-btn" onClick={handleRefresh} disabled={!showRefresh}>
           <RefreshIcon className={spinning ? 'spin' : undefined} />
+          刷新
         </button>
-      )}
+        <button className="btn primary toolbar-btn" onClick={onAdd}>
+          <PlusIcon />
+          添加
+        </button>
+      </div>
     </div>
   )
 }

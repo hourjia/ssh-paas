@@ -80,6 +80,68 @@ export function runCommand(conn, cmd, timeoutMs = 15000) {
   })
 }
 
+// 通过 stdin 把脚本交给远端 bash，避免命令行转义问题，并实时回传输出
+export function execScript(conn, script, { timeoutMs = 60000, onStdout, onStderr } = {}) {
+  return new Promise((resolve, reject) => {
+    conn.exec('bash -s', (err, stream) => {
+      if (err) return reject(new Error(friendlySshError(err)))
+      let stdout = ''
+      let stderr = ''
+      let settled = false
+      let timer
+      const settle = (fn, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        fn(value)
+      }
+      timer = setTimeout(() => {
+        try {
+          stream.signal('KILL')
+        } catch {
+          /* ignore */
+        }
+        try {
+          stream.close()
+        } catch {
+          /* ignore */
+        }
+        settle(reject, new Error('远程脚本执行超时'))
+      }, timeoutMs)
+      stream.on('data', (d) => {
+        const text = d.toString('utf8')
+        stdout += text
+        onStdout?.(text)
+      })
+      stream.stderr.on('data', (d) => {
+        const text = d.toString('utf8')
+        stderr += text
+        onStderr?.(text)
+      })
+      stream.on('error', (e) => settle(reject, new Error(friendlySshError(e))))
+      stream.on('close', (code, signal) => settle(resolve, { code, signal, stdout, stderr }))
+      stream.end(script.endsWith('\n') ? script : `${script}\n`)
+    })
+  })
+}
+
+export function sftpWrite(conn, remotePath, content, mode = 0o644) {
+  return new Promise((resolve, reject) => {
+    conn.sftp((err, sftp) => {
+      if (err) return reject(new Error(friendlySshError(err)))
+      const finish = (e) => {
+        sftp.end()
+        if (e) reject(e)
+        else resolve()
+      }
+      const stream = sftp.createWriteStream(remotePath, { mode })
+      stream.on('error', finish)
+      stream.on('close', () => sftp.chmod(remotePath, mode, finish))
+      stream.end(Buffer.from(content, 'utf8'))
+    })
+  })
+}
+
 const PROBE_CMD = '(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"); uname -srm'
 
 export async function probeServer(conn) {
@@ -92,7 +154,6 @@ export async function probeServer(conn) {
   }
   return { latencyMs, os }
 }
-
 export function generateKeyPair(comment = 'ourjia-paas') {
   // ssh2 无法解析 Node crypto 的 PKCS8 ed25519 私钥，改用它自己的 OpenSSH 格式生成器
   const { private: privateKeyPem, public: pubKey } = utils.generateKeyPairSync('ed25519')

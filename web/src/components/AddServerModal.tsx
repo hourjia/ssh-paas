@@ -10,6 +10,7 @@ interface AddServerModalProps {
 
 export function AddServerModal({ open, onClose, onSubmit }: AddServerModalProps) {
   const [address, setAddress] = useState('')
+  const [port, setPort] = useState('22')
   const [name, setName] = useState('')
   const [user, setUser] = useState('')
   const [password, setPassword] = useState('')
@@ -17,13 +18,21 @@ export function AddServerModal({ open, onClose, onSubmit }: AddServerModalProps)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const portNum = Number(port)
+  const portInvalid = port.trim() !== '' && (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535)
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (busy) return
+    if (portInvalid) {
+      setError('端口不合法（1-65535）')
+      return
+    }
     setBusy(true)
     setError(null)
     const err = await onSubmit({
       address,
+      port: port.trim() === '' ? 22 : portNum,
       name: name.trim() || undefined,
       user,
       password,
@@ -35,6 +44,7 @@ export function AddServerModal({ open, onClose, onSubmit }: AddServerModalProps)
       return
     }
     setAddress('')
+    setPort('22')
     setName('')
     setUser('')
     setPassword('')
@@ -47,14 +57,28 @@ export function AddServerModal({ open, onClose, onSubmit }: AddServerModalProps)
     <Modal open={open} onClose={onClose} title="添加服务器">
       <form onSubmit={handleSubmit}>
         <div className="form-grid">
-          <div className="field">
-            <label>服务器地址 *</label>
-            <input
-              required
-              value={address}
-              onChange={(e) => setAddress(e.target.value)}
-              placeholder="例如 192.168.1.12 或 10.0.0.5:2222"
-            />
+          <div className="field-row-split">
+            <div className="field">
+              <label>服务器地址 *</label>
+              <input
+                required
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="例如 192.168.1.12"
+              />
+            </div>
+            <div className="field field-port">
+              <label>SSH 端口</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                placeholder="22"
+                aria-invalid={portInvalid}
+              />
+            </div>
           </div>
           <div className="field">
             <label>服务器名称</label>

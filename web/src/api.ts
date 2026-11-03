@@ -1,4 +1,10 @@
-import type { AddServerPayload, ServerRecord } from './types'
+import type {
+  AddServerPayload,
+  CheckReport,
+  JobSnapshot,
+  ServerConfig,
+  ServerRecord,
+} from './types'
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -29,4 +35,77 @@ export function testServer(id: string) {
 
 export function deleteServer(id: string) {
   return request<{ ok: boolean }>(`/api/servers/${id}`, { method: 'DELETE' })
+}
+
+export function getConfig(id: string) {
+  return request<{ config: ServerConfig }>(`/api/servers/${id}/config`)
+}
+
+export function saveConfig(id: string, config: ServerConfig) {
+  return request<{ config: ServerConfig }>(`/api/servers/${id}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
+  })
+}
+
+export function runCheck(id: string, refreshMirrors = false) {
+  return request<CheckReport>(`/api/servers/${id}/check`, {
+    method: 'POST',
+    body: JSON.stringify({ refreshMirrors }),
+  })
+}
+
+export function startInit(id: string, config: ServerConfig) {
+  return request<{ job: JobSnapshot }>(`/api/servers/${id}/init`, {
+    method: 'POST',
+    body: JSON.stringify({ config }),
+  })
+}
+
+export function getJob(id: string) {
+  return request<{ job: JobSnapshot }>(`/api/jobs/${id}`)
+}
+
+const TERMINAL = new Set(['done', 'failed', 'interrupted'])
+
+// 订阅任务 SSE；返回取消函数。事件与后端保持一致：state / step / log
+export function streamJob(
+  id: string,
+  handlers: {
+    onState?: (job: JobSnapshot) => void
+    onStep?: (step: JobSnapshot['steps'][number]) => void
+    onLog?: (log: { stream: string; text: string; at?: string }) => void
+    onEnd?: () => void
+  },
+) {
+  const es = new EventSource(`/api/jobs/${id}/stream`)
+  const parse = <T,>(raw: string): T | null => {
+    try {
+      return JSON.parse(raw) as T
+    } catch {
+      return null
+    }
+  }
+  es.addEventListener('state', (e) => {
+    const data = parse<JobSnapshot>((e as MessageEvent).data)
+    if (!data) return
+    handlers.onState?.(data)
+    if (TERMINAL.has(data.status)) {
+      es.close()
+      handlers.onEnd?.()
+    }
+  })
+  es.addEventListener('step', (e) => {
+    const data = parse<JobSnapshot['steps'][number]>((e as MessageEvent).data)
+    if (data) handlers.onStep?.(data)
+  })
+  es.addEventListener('log', (e) => {
+    const data = parse<{ stream: string; text: string }>((e as MessageEvent).data)
+    if (data) handlers.onLog?.(data)
+  })
+  es.onerror = () => {
+    es.close()
+    handlers.onEnd?.()
+  }
+  return () => es.close()
 }

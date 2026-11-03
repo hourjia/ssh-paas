@@ -7,7 +7,7 @@ interface ServersPageProps {
   testingIds: Set<string>
   onTest: (id: string) => void
   onDelete: (id: string) => void
-  onManage: () => void
+  onManage: (id: string) => void
   onAdd: () => void
 }
 
@@ -19,7 +19,7 @@ export function ServersPage({ servers, testingIds, onTest, onDelete, onManage, o
           <ServerIcon />
         </div>
         <h3>还没有服务器</h3>
-        <p>点击右上角 + 添加第一台服务器，开始统一运维。</p>
+        <p>点击右上角「添加」，接入第一台服务器。</p>
         <button className="btn primary" onClick={onAdd}>
           添加服务器
         </button>
@@ -35,9 +35,9 @@ export function ServersPage({ servers, testingIds, onTest, onDelete, onManage, o
           server={s}
           index={i}
           testing={testingIds.has(s.id)}
+          onOpen={() => onManage(s.id)}
           onTest={() => onTest(s.id)}
           onDelete={() => onDelete(s.id)}
-          onManage={onManage}
         />
       ))}
     </div>

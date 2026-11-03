@@ -6,6 +6,7 @@ import { Sidebar, type PageKey } from './components/Sidebar'
 import { ActionDock } from './components/ActionDock'
 import { ServersPage } from './pages/ServersPage'
 import { AppsPage } from './pages/AppsPage'
+import { ServerDetailPage } from './pages/ServerDetailPage'
 import { AddServerModal } from './components/AddServerModal'
 import { SettingsModal } from './components/SettingsModal'
 import { Toasts, type ToastItem } from './components/Toasts'
@@ -41,6 +42,7 @@ const AUTO_REFRESH_MS: Record<Exclude<Settings['autoRefresh'], 'off'>, number> =
 
 export default function App() {
   const [page, setPage] = useState<PageKey>('servers')
+  const [detailId, setDetailId] = useState<string | null>(null)
   const [servers, setServers] = useState<ServerRecord[]>([])
   const [loaded, setLoaded] = useState(false)
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
@@ -153,6 +155,7 @@ export default function App() {
       try {
         await api.deleteServer(id)
         setServers((prev) => prev.filter((s) => s.id !== id))
+        setDetailId((cur) => (cur === id ? null : cur))
         toast('服务器已删除')
       } catch (e) {
         toast(e instanceof Error ? e.message : '删除失败')
@@ -161,9 +164,20 @@ export default function App() {
     [toast],
   )
 
-  const onlineCount = servers.filter((s) => s.status === 'online').length
-  const keyCount = servers.filter((s) => s.authType === 'key' && s.keyInstalled).length
-  const sep = <span className="sep" />
+  const handleServerUpdate = useCallback((server: ServerRecord) => {
+    setServers((prev) => prev.map((s) => (s.id === server.id ? server : s)))
+  }, [])
+
+  const detailServer = detailId ? servers.find((s) => s.id === detailId) ?? null : null
+
+  // 详情页期间不轮询，避免打断任务日志
+  useEffect(() => {
+    if (detailId) return
+    if (settings.autoRefresh === 'off' || page !== 'servers') return
+    const ms = AUTO_REFRESH_MS[settings.autoRefresh]
+    const timer = setInterval(() => testAll(true), ms)
+    return () => clearInterval(timer)
+  }, [settings.autoRefresh, page, testAll, detailId])
 
   return (
     <>
@@ -178,44 +192,38 @@ export default function App() {
         <Sidebar page={page} onPage={setPage} onSettings={() => setSettingsOpen(true)} />
 
         <main className="main">
-          <header className="page-head">
-            <p className="eyebrow">{page === 'servers' ? 'Workspace · 服务器集群' : 'Workspace · 应用矩阵'}</p>
-            <h1>{page === 'servers' ? '服务器' : '应用'}</h1>
-            <p className="page-sub">
-              {page === 'servers' ? (
-                <>
-                  {servers.length} 台服务器{sep}
-                  {onlineCount} 台在线{sep}
-                  {keyCount} 台密钥认证
-                </>
-              ) : (
-                <>应用与服务状态管理将在后续版本开放</>
-              )}
-            </p>
-          </header>
-
-          <ActionDock
-            showRefresh={page === 'servers'}
-            onAdd={() => (page === 'servers' ? setAddOpen(true) : toast('应用管理将在后续版本开放'))}
-            onRefresh={() => testAll(false)}
-          />
-
-          {page === 'servers' ? (
-            loaded ? (
-              <ServersPage
-                servers={servers}
-                testingIds={testingIds}
-                onTest={(id) => testOne(id)}
-                onDelete={handleDelete}
-                onManage={() => toast('服务器详情页将在后续版本开放')}
-                onAdd={() => setAddOpen(true)}
-              />
-            ) : null
+          {detailServer ? (
+            <ServerDetailPage
+              server={detailServer}
+              onBack={() => setDetailId(null)}
+              onServerUpdate={handleServerUpdate}
+              onToast={toast}
+            />
           ) : (
-            <AppsPage onGoServers={() => setPage('servers')} />
-          )}
+            <>
+              <ActionDock
+                showRefresh={page === 'servers'}
+                onAdd={() => (page === 'servers' ? setAddOpen(true) : toast('应用管理将在后续版本开放'))}
+                onRefresh={() => testAll(false)}
+              />
+              {page === 'servers' ? (
+                loaded ? (
+                  <ServersPage
+                    servers={servers}
+                    testingIds={testingIds}
+                    onTest={(id) => testOne(id)}
+                    onDelete={handleDelete}
+                    onManage={(id) => setDetailId(id)}
+                    onAdd={() => setAddOpen(true)}
+                  />
+                ) : null
+              ) : (
+                <AppsPage onGoServers={() => setPage('servers')} />
+              )}
 
-          <p className="foot-note">Ourjia PaaS v0.1 · SSH 运维平台</p>
+              <p className="foot-note">Ourjia PaaS v0.1 · SSH 运维平台</p>
+            </>
+          )}
         </main>
       </div>
 

@@ -4,6 +4,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { encrypt, decrypt, getServers, saveServers, findServer, publicServer } from './store.js'
 import { connectSSH, probeServer, generateKeyPair, installPublicKey } from './ssh.js'
+import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js'
+import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
+import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
+import { runInit, planSteps } from './init.js'
 
 const PORT = Number(process.env.PORT) || 8787
 const now = () => new Date().toISOString()
@@ -24,7 +28,7 @@ const wrap = (fn) => (req, res) => {
   })
 }
 
-function parseTarget(raw) {
+function parseTarget(raw, rawPort) {
   let host = String(raw || '').trim()
   if (!host) throw badRequest('服务器地址不能为空')
   let port = 22
@@ -32,9 +36,47 @@ function parseTarget(raw) {
   if (m && !m[1].includes(':')) {
     host = m[1]
     port = Number(m[2])
+  } else if (rawPort !== undefined && rawPort !== null && String(rawPort).trim() !== '') {
+    port = Number(rawPort)
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw badRequest('端口不合法（1-65535）')
   return { host, port }
+}
+
+function serverCredentials(rec) {
+  const creds = { host: rec.host, port: rec.port, user: rec.user }
+  if (rec.authType === 'key') {
+    creds.privateKey = decrypt(rec.privateKeyEnc)
+    if (!creds.privateKey) throw badRequest('尚未安装密钥，无法连接')
+  } else {
+    creds.password = decrypt(rec.passwordEnc)
+    if (!creds.password) throw badRequest('未保存密码，无法连接')
+  }
+  return creds
+}
+
+async function withConnection(rec, fn) {
+  const conn = await connectSSH(serverCredentials(rec))
+  try {
+    return await fn(conn)
+  } finally {
+    conn.end()
+  }
+}
+
+const PRIVATE_IPV4_RE = /^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/
+
+// 公网 IP 采集失败时，用 SSH 连接地址兜底（仅当它是公网 IPv4）
+function reachTarget(facts, rec) {
+  const ip = String(facts.PUBLIC_IP || '').trim()
+  if (ip) return ip
+  const host = String(rec.host || '').trim()
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host) && !PRIVATE_IPV4_RE.test(host)) return host
+  return ''
+}
+
+function serverConfig(rec) {
+  return normalizeConfig(rec.config || {}, defaultConfig())
 }
 
 app.get('/api/servers', wrap((_req, res) => {
@@ -42,10 +84,10 @@ app.get('/api/servers', wrap((_req, res) => {
 }))
 
 app.post('/api/servers', wrap(async (req, res) => {
-  const { address, name, user, password, keyAuth } = req.body || {}
+  const { address, name, port: rawPort, user, password, keyAuth } = req.body || {}
   if (!String(user || '').trim()) throw badRequest('SSH 用户不能为空')
   if (!password) throw badRequest('SSH 密码不能为空')
-  const { host, port } = parseTarget(address)
+  const { host, port } = parseTarget(address, rawPort)
   const trimmedUser = String(user).trim()
   const dup = getServers().find((s) => s.host === host && s.port === port && s.user === trimmedUser)
   if (dup) throw badRequest('该服务器（地址 + 端口 + 用户）已存在')
@@ -66,6 +108,8 @@ app.post('/api/servers', wrap(async (req, res) => {
     lastError: null,
     latencyMs: null,
     os: null,
+    config: defaultConfig(),
+    init: { state: 'unknown', lastCheckAt: null, lastInitAt: null, summary: null, error: null },
     createdAt: now(),
     lastCheckAt: null,
   }
@@ -157,6 +201,130 @@ app.delete('/api/servers/:id', wrap((req, res) => {
   res.json({ ok: true })
 }))
 
+app.get('/api/servers/:id/config', wrap((req, res) => {
+  const rec = findServer(req.params.id)
+  if (!rec) throw badRequest('服务器不存在')
+  res.json({ config: serverConfig(rec) })
+}))
+
+app.put('/api/servers/:id/config', wrap((req, res) => {
+  const rec = findServer(req.params.id)
+  if (!rec) throw badRequest('服务器不存在')
+  if (jobLocked(rec.id)) throw badRequest('该服务器有进行中的任务，请等待完成后再修改配置')
+  rec.config = normalizeConfig(req.body?.config || {}, defaultConfig())
+  saveServers()
+  res.json({ config: rec.config })
+}))
+
+app.post('/api/servers/:id/check', wrap(async (req, res) => {
+  const rec = findServer(req.params.id)
+  if (!rec) throw badRequest('服务器不存在')
+  const config = serverConfig(rec)
+  const refreshMirrors = req.body?.refreshMirrors === true
+
+  const started = Date.now()
+  const { facts, probes } = await withConnection(rec, async (conn) => {
+    const facts = await collectFacts(conn)
+    let probes = []
+    if (refreshMirrors || config.dockerHubMirrors.length) {
+      probes = await probeRegistryMirrors(conn, config.dockerHubMirrors, resolveTraefikImage(config))
+    }
+    return { facts, probes }
+  })
+  const latencyMs = Date.now() - started
+
+  // 公网 80/443 从平台侧实测：只靠服务器本机的 ss 看不到云安全组
+  const reach = await probePublicPorts(reachTarget(facts, rec), [80, 443])
+  const report = buildCheckReport(facts, config, probes, reach)
+
+  rec.os = facts.OS_PRETTY ? `${facts.OS_PRETTY} · ${facts.KERNEL || ''}`.trim() : rec.os
+  rec.status = 'online'
+  rec.lastError = null
+  rec.latencyMs = latencyMs
+  rec.lastCheckAt = now()
+  rec.init = {
+    state: report.initialized ? (report.upToDate ? 'ready' : 'drifted') : 'uninitialized',
+    lastCheckAt: now(),
+    lastInitAt: report.record?.finishedAt || rec.init?.lastInitAt || null,
+    summary: report.summary,
+    error: null,
+  }
+  saveServers()
+  res.json({ ...report, server: publicServer(rec), latencyMs: rec.latencyMs })
+}))
+
+app.post('/api/servers/:id/init', wrap(async (req, res) => {
+  const rec = findServer(req.params.id)
+  if (!rec) throw badRequest('服务器不存在')
+  const running = jobLocked(rec.id)
+  if (running) throw badRequest('该服务器已有进行中的任务')
+
+  const config = normalizeConfig(req.body?.config || rec.config || {}, defaultConfig())
+  rec.config = config
+  saveServers()
+
+  const job = createJob(rec.id, 'init', planSteps(config))
+  if (!acquireLock(rec.id, job.id)) throw badRequest('该服务器已有进行中的任务')
+  res.json({ job: snapshot(job) })
+
+  // 后台执行
+  ;(async () => {
+    let conn
+    try {
+      conn = await connectSSH(serverCredentials(rec))
+      await runInit(job, conn, rec, config)
+    } catch (err) {
+      const { setJobState, appendLog } = await import('./jobs.js')
+      appendLog(job, `连接失败：${err.message}`, 'err')
+      setJobState(job, 'failed', err.message)
+    } finally {
+      conn?.end()
+      releaseLock(rec.id)
+      rec.init = {
+        state: job.status === 'done' ? 'ready' : 'uninitialized',
+        lastCheckAt: now(),
+        lastInitAt: job.status === 'done' ? now() : rec.init?.lastInitAt || null,
+        summary: rec.init?.summary || null,
+        error: job.status === 'failed' ? job.error : null,
+      }
+      saveServers()
+    }
+  })()
+}))
+
+app.get('/api/jobs/:id', wrap((req, res) => {
+  const job = getJob(req.params.id)
+  if (!job) throw badRequest('任务不存在')
+  res.json({ job: snapshot(job, true) })
+}))
+
+app.get('/api/jobs/:id/stream', (req, res) => {
+  const job = getJob(req.params.id)
+  if (!job) {
+    res.status(404).json({ error: '任务不存在' })
+    return
+  }
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  // 先补发已有日志与状态，支持断线重连
+  send('state', snapshot(job, false))
+  for (const log of job.logs) send('log', { stream: log.stream, text: log.text, at: log.at })
+  const unsubscribe = subscribe(job, send)
+  const ping = setInterval(() => res.write(': ping\n\n'), 15000)
+  const cleanup = () => {
+    clearInterval(ping)
+    unsubscribe()
+  }
+  req.on('close', cleanup)
+})
+
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: '接口不存在' })
 })
@@ -174,5 +342,6 @@ if (fs.existsSync(distDir)) {
 }
 
 app.listen(PORT, () => {
+  markInterrupted()
   console.log(`[ourjia-paas] server listening on http://127.0.0.1:${PORT}`)
 })
