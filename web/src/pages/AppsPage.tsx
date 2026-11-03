@@ -45,6 +45,15 @@ const POSTGRES_PRESET = {
   env: 'POSTGRES_DB=appdb\nPOSTGRES_USER=appuser\nPOSTGRES_PASSWORD=change-me',
 }
 
+const REDIS_PRESET = {
+  image: 'redis:7-alpine',
+  port: '6379',
+  alias: 'redis',
+  containerPath: '/data',
+  dataOwner: '',
+  healthCmd: 'redis-cli ping',
+}
+
 function randomPassword() {
   const bytes = crypto.getRandomValues(new Uint8Array(24))
   return Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
@@ -173,6 +182,21 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       dataOwner: POSTGRES_PRESET.dataOwner,
       healthCmd: POSTGRES_PRESET.healthCmd,
       env: cur.env.trim() ? cur.env : POSTGRES_PRESET.env,
+    }))
+  }
+
+  const applyRedis = () => {
+    setKind('service')
+    setForm((cur) => ({
+      ...cur,
+      name: cur.name || 'redis',
+      image: REDIS_PRESET.image,
+      port: REDIS_PRESET.port,
+      alias: cur.alias || REDIS_PRESET.alias,
+      containerPath: REDIS_PRESET.containerPath,
+      dataOwner: REDIS_PRESET.dataOwner,
+      healthCmd: REDIS_PRESET.healthCmd,
+      env: cur.env,
     }))
   }
 
@@ -364,9 +388,15 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
           </div>
 
           {kind === 'service' && (
-            <button type="button" className="link-btn" onClick={applyPostgres}>
-              填入 PostgreSQL 默认值
-            </button>
+            <div className="preset-row">
+              <span className="form-hint">预设：</span>
+              <button type="button" className="link-btn" onClick={applyPostgres}>
+                PostgreSQL 16
+              </button>
+              <button type="button" className="link-btn" onClick={applyRedis}>
+                Redis 7
+              </button>
+            </div>
           )}
 
           <div className="field">

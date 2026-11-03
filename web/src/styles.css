@@ -651,3 +651,4 @@ select{cursor:pointer}
 .res-actions{display:flex;justify-content:flex-end;margin-top:14px}
 .res-confirm{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:13px}
 .res-confirm li{display:flex;align-items:center;gap:4px}
+.preset-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
