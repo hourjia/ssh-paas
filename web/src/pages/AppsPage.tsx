@@ -327,7 +327,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                   <div>
                     <dt>镜像</dt>
                     <dd className="mono" title={app.image || undefined}>
-                      {app.image || '示例构建'}
+                      {app.image || '—'}
                     </dd>
                   </div>
                   <div>

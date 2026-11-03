@@ -211,7 +211,7 @@ export function publicApp(app) {
     id: app.id,
     serverId: app.serverId,
     name: app.name,
-    kind: app.kind || 'sample',
+    kind: app.kind || 'image',
     domain: app.domain || null,
     image: app.image || null,
     notes: app.notes || null,
@@ -229,14 +229,13 @@ export function publicApp(app) {
 
 export function appPaths(app) {
   return {
-    repo: `/srv/git/${app.id}.git`,
     dir: `/srv/apps/${app.id}`,
   }
 }
 
-// 删除应用时在服务器上执行的清理脚本：容器、部署目录、示例交付仓库，数据目录需显式授权
+// 删除应用时在服务器上执行的清理脚本：容器、部署目录，数据目录需显式授权
 export function buildCleanupScript(app, removeData = false) {
-  const { dir, repo } = appPaths(app)
+  const { dir } = appPaths(app)
   const lines = [
     'set -e',
     `DIR=${dir}`,
@@ -246,7 +245,6 @@ export function buildCleanupScript(app, removeData = false) {
     `docker rm -f ourjia_${app.id} >/dev/null 2>&1 || true`,
     'rm -rf "$DIR"',
   ]
-  if (app.kind === 'sample') lines.push(`rm -rf ${repo}`)
   if (removeData && app.kind === 'service' && app.service?.dataDir) {
     const dataDir = app.service.dataDir
     if (!/^\/srv\/(data|shared)\/[A-Za-z0-9._/-]+$/.test(dataDir) || dataDir.includes('..')) {

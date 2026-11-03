@@ -163,7 +163,7 @@ export interface AppRecord {
   domain: string | null
   image: string | null
   notes: string | null
-  kind: 'sample' | 'image' | 'service'
+  kind: 'image' | 'service'
   envKeys: string[]
   service: AppServiceConfig | null
   runtime: { baseImage?: string; port: number; healthPath: string | null }
