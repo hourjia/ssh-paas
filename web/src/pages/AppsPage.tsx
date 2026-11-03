@@ -28,6 +28,26 @@ const EMPTY_FORM = {
   port: '80',
   env: '',
   notes: '',
+  alias: '',
+  dataDir: '',
+  containerPath: '',
+  dataOwner: '',
+  healthCmd: '',
+}
+
+const POSTGRES_PRESET = {
+  image: 'postgres:16-alpine',
+  port: '5432',
+  alias: 'postgres',
+  containerPath: '/var/lib/postgresql/data',
+  dataOwner: '',
+  healthCmd: 'pg_isready -U appuser -d appdb',
+  env: 'POSTGRES_DB=appdb\nPOSTGRES_USER=appuser\nPOSTGRES_PASSWORD=change-me',
+}
+
+function randomPassword() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24))
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
 }
 
 export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onGoServers, onToast }: AppsPageProps) {
@@ -38,6 +58,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [logTitle, setLogTitle] = useState('部署 · 终端输出')
   const unsubRef = useRef<(() => void) | null>(null)
 
+  const [kind, setKind] = useState<'image' | 'service'>('image')
   const [form, setForm] = useState(EMPTY_FORM)
   const [serverId, setServerId] = useState('')
   const [creating, setCreating] = useState(false)
@@ -129,6 +150,33 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setForm((cur) => ({ ...cur, [key]: value }))
   }
 
+  const applyPostgres = () => {
+    setKind('service')
+    setForm((cur) => ({
+      ...cur,
+      name: cur.name || 'postgres',
+      image: POSTGRES_PRESET.image,
+      port: POSTGRES_PRESET.port,
+      alias: cur.alias || POSTGRES_PRESET.alias,
+      containerPath: POSTGRES_PRESET.containerPath,
+      dataOwner: POSTGRES_PRESET.dataOwner,
+      healthCmd: POSTGRES_PRESET.healthCmd,
+      env: cur.env.trim() ? cur.env : POSTGRES_PRESET.env,
+    }))
+  }
+
+  const fillPassword = () => {
+    const pwd = randomPassword()
+    setForm((cur) => {
+      const line = `POSTGRES_PASSWORD=${pwd}`
+      const env = /^POSTGRES_PASSWORD=.*$/m.test(cur.env)
+        ? cur.env.replace(/^POSTGRES_PASSWORD=.*$/m, line)
+        : `${cur.env}${cur.env.trim() ? '\n' : ''}${line}`
+      return { ...cur, env }
+    })
+    onToast('已生成随机密码，请记得保存')
+  }
+
   const submit = useCallback(async () => {
     if (creating) return
     if (!serverId) {
@@ -140,23 +188,29 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     try {
       const { app } = await api.createApp({
         serverId,
+        kind,
         name: form.name.trim(),
         image: form.image.trim(),
-        domain: form.domain.trim(),
-        port: Number(form.port) || 80,
+        domain: kind === 'image' ? form.domain.trim() : undefined,
+        port: Number(form.port) || (kind === 'service' ? 5432 : 80),
         env: form.env,
         notes: form.notes.trim(),
+        alias: kind === 'service' ? form.alias.trim() : undefined,
+        dataDir: kind === 'service' ? form.dataDir.trim() || undefined : undefined,
+        containerPath: kind === 'service' ? form.containerPath.trim() : undefined,
+        dataOwner: kind === 'service' ? form.dataOwner.trim() : undefined,
+        healthCmd: kind === 'service' ? form.healthCmd.trim() : undefined,
       })
       setApps((prev) => [app, ...prev])
       setForm(EMPTY_FORM)
       onCloseCreate()
-      onToast('应用已创建，可以开始部署')
+      onToast(kind === 'service' ? '共享服务已创建，可以开始部署' : '应用已创建，可以开始部署')
     } catch (e) {
       setFormError(e instanceof Error ? e.message : '创建失败')
     } finally {
       setCreating(false)
     }
-  }, [creating, form, onCloseCreate, onToast, serverId])
+  }, [creating, form, kind, onCloseCreate, onToast, serverId])
 
   return (
     <div className="apps-page">
@@ -164,10 +218,10 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         <div>
           <p className="eyebrow">Apps</p>
           <h2 className="apps-title">应用</h2>
-          <p className="apps-sub">填写镜像与域名，部署后由 Traefik 自动路由并申请证书。</p>
+          <p className="apps-sub">Web 应用经 Traefik 暴露域名；共享服务只挂 shared-net，不暴露公网。</p>
         </div>
         <button className="btn primary" onClick={onOpenCreate} disabled={!servers.length}>
-          <PlusIcon /> 新建应用
+          <PlusIcon /> 新建
         </button>
       </div>
 
@@ -185,12 +239,12 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
           <h3>还没有应用</h3>
           <p>
             {servers.length
-              ? '创建一个应用，填好镜像地址与域名，即可部署到服务器并通过 HTTPS 访问。'
+              ? '新建一个 Web 应用或共享服务（如 PostgreSQL），部署到服务器。'
               : '先到「服务器」页添加并初始化一台服务器。'}
           </p>
           {servers.length ? (
             <button className="btn primary" onClick={onOpenCreate}>
-              <PlusIcon /> 新建应用
+              <PlusIcon /> 新建
             </button>
           ) : (
             <button className="btn ghost" onClick={onGoServers}>
@@ -205,14 +259,24 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
           {apps.map((app) => {
             const st = STATUS[app.status] || STATUS.idle
             const deploying = app.status === 'deploying' || busyId === app.id
+            const isService = app.kind === 'service'
             return (
               <article key={app.id} className="glass-lite app-card reveal">
                 <div className="app-card-head">
                   <div>
-                    <h3 className="app-name">{app.name}</h3>
-                    <a className="app-domain mono" href={`https://${app.domain}`} target="_blank" rel="noreferrer">
-                      {app.domain}
-                    </a>
+                    <h3 className="app-name">
+                      {app.name}
+                      {isService && <span className="app-tag">共享服务</span>}
+                    </h3>
+                    {isService ? (
+                      <span className="app-domain mono">
+                        {app.service?.alias || `ourjia_${app.id}`}:{app.runtime.port}
+                      </span>
+                    ) : (
+                      <a className="app-domain mono" href={`https://${app.domain}`} target="_blank" rel="noreferrer">
+                        {app.domain}
+                      </a>
+                    )}
                   </div>
                   <span className={`status-pill ${st.cls}`}>
                     <i />
@@ -232,8 +296,14 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                     </dd>
                   </div>
                   <div>
-                    <dt>部署时间</dt>
-                    <dd>{app.delivery.deployedAt ? new Date(app.delivery.deployedAt).toLocaleString() : '—'}</dd>
+                    <dt>{isService ? '数据目录' : '部署时间'}</dt>
+                    <dd className="mono" title={isService ? app.service?.dataDir : undefined}>
+                      {isService
+                        ? app.service?.dataDir || '—'
+                        : app.delivery.deployedAt
+                          ? new Date(app.delivery.deployedAt).toLocaleString()
+                          : '—'}
+                    </dd>
                   </div>
                 </dl>
 
@@ -273,9 +343,24 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
 
       <Modal open={createOpen} onClose={onCloseCreate} title="新建应用">
         <div className="form-grid">
+          <div className="segmented">
+            <button type="button" className={kind === 'image' ? 'active' : ''} onClick={() => setKind('image')}>
+              Web 应用
+            </button>
+            <button type="button" className={kind === 'service' ? 'active' : ''} onClick={() => setKind('service')}>
+              共享服务
+            </button>
+          </div>
+
+          {kind === 'service' && (
+            <button type="button" className="link-btn" onClick={applyPostgres}>
+              填入 PostgreSQL 默认值
+            </button>
+          )}
+
           <div className="field">
-            <label>应用名称</label>
-            <input value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="例如 官网前端" />
+            <label>名称</label>
+            <input value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="例如 主数据库" />
           </div>
 
           <div className="field">
@@ -283,9 +368,13 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             <input
               value={form.image}
               onChange={(e) => setField('image', e.target.value)}
-              placeholder="registry.example.com/team/app:v1"
+              placeholder={kind === 'service' ? 'postgres:16-alpine' : 'registry.example.com/team/app:v1'}
             />
-            <p className="form-hint">服务器会直接拉取这个镜像，私有仓库需提前在服务器上 docker login。</p>
+            <p className="form-hint">
+              {kind === 'service'
+                ? '服务器会直接拉取镜像；私有仓库需提前在服务器上 docker login。'
+                : '服务器会直接拉取这个镜像，私有仓库需提前在服务器上 docker login。'}
+            </p>
           </div>
 
           <div className="field">
@@ -300,23 +389,66 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             </select>
           </div>
 
-          <div className="field-row-split">
-            <div className="field">
-              <label>域名</label>
-              <input value={form.domain} onChange={(e) => setField('domain', e.target.value)} placeholder="app.example.com" />
+          {kind === 'image' ? (
+            <div className="field-row-split">
+              <div className="field">
+                <label>域名</label>
+                <input value={form.domain} onChange={(e) => setField('domain', e.target.value)} placeholder="app.example.com" />
+              </div>
+              <div className="field">
+                <label>容器端口</label>
+                <input type="number" min={1} max={65535} value={form.port} onChange={(e) => setField('port', e.target.value)} />
+              </div>
             </div>
-            <div className="field">
-              <label>容器端口</label>
-              <input
-                type="number"
-                min={1}
-                max={65535}
-                value={form.port}
-                onChange={(e) => setField('port', e.target.value)}
-              />
-            </div>
-          </div>
-          <p className="form-hint">域名解析由你自行配置；未解析时 HTTPS 会显示警告，不影响容器启动。</p>
+          ) : (
+            <>
+              <div className="field-row-split">
+                <div className="field">
+                  <label>网络别名（可选）</label>
+                  <input value={form.alias} onChange={(e) => setField('alias', e.target.value)} placeholder="postgres" />
+                </div>
+                <div className="field">
+                  <label>服务端口</label>
+                  <input type="number" min={1} max={65535} value={form.port} onChange={(e) => setField('port', e.target.value)} />
+                </div>
+              </div>
+              <p className="form-hint">同一服务器上别名唯一，应用内通过「别名:端口」访问，例如 postgres:5432。</p>
+
+              <div className="field">
+                <label>数据目录（宿主机）</label>
+                <input
+                  value={form.dataDir}
+                  onChange={(e) => setField('dataDir', e.target.value)}
+                  placeholder="留空则使用 /srv/data/<应用 ID>"
+                />
+              </div>
+              <div className="field">
+                <label>容器内数据路径</label>
+                <input
+                  value={form.containerPath}
+                  onChange={(e) => setField('containerPath', e.target.value)}
+                  placeholder="/var/lib/postgresql/data"
+                />
+              </div>
+
+              <div className="field-row-split">
+                <div className="field">
+                  <label>目录所有者（可选）</label>
+                  <input value={form.dataOwner} onChange={(e) => setField('dataOwner', e.target.value)} placeholder="999:999" />
+                </div>
+                <div className="field">
+                  <label>健康检查命令（可选）</label>
+                  <input
+                    value={form.healthCmd}
+                    onChange={(e) => setField('healthCmd', e.target.value)}
+                    placeholder="pg_isready -U appuser -d appdb"
+                  />
+                </div>
+              </div>
+              <p className="form-hint">目录所有者只在数据目录为空时应用；官方 postgres 镜像会自行处理权限，通常留空。</p>
+            </>
+          )}
+          {kind === 'image' && <p className="form-hint">域名解析由你自行配置；未解析时 HTTPS 会显示警告，不影响容器启动。</p>}
 
           <div className="field">
             <label>环境变量（可选）</label>
@@ -324,9 +456,16 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
               rows={4}
               value={form.env}
               onChange={(e) => setField('env', e.target.value)}
-              placeholder={'每行一个 KEY=VALUE\nNODE_ENV=production\nDATABASE_URL=postgres://...'}
+              placeholder={'每行一个 KEY=VALUE\nPOSTGRES_DB=appdb\nPOSTGRES_USER=appuser\nPOSTGRES_PASSWORD=...'}
             />
-            <p className="form-hint">保存时整体加密，部署时写入容器；日志中只显示变量名。</p>
+            <div className="env-hint-row">
+              <span className="form-hint">保存时整体加密，部署时写入容器；日志中只显示变量名。</span>
+              {kind === 'service' && (
+                <button type="button" className="link-btn" onClick={fillPassword}>
+                  生成随机密码
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="field">

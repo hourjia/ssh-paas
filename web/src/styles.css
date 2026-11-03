@@ -635,3 +635,5 @@ select{cursor:pointer}
 .app-actions{display:flex;gap:8px;margin-top:auto}
 @media (max-width:640px){.app-meta{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .app-notes{margin:0;font-size:12.5px;line-height:1.6;color:var(--text-3);overflow-wrap:anywhere}
+.app-tag{margin-left:8px;font-size:10.5px;font-weight:600;color:var(--accent);background:var(--accent-soft);padding:2px 7px;border-radius:6px;vertical-align:middle}
+.env-hint-row{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}

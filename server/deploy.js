@@ -19,6 +19,13 @@ async function git(cwd, args) {
 }
 
 export function planDeploySteps(app) {
+  if (app?.kind === 'service') {
+    return [
+      { id: 'config', title: '生成并上传服务配置' },
+      { id: 'pull', title: '拉取镜像' },
+      { id: 'deploy', title: '启动共享服务' },
+    ]
+  }
   if (app?.kind === 'image') {
     return [
       { id: 'config', title: '生成并上传部署配置' },
@@ -93,8 +100,44 @@ function buildImageCompose(app, env) {
   return lines.join('\n')
 }
 
-function buildSampleCompose(app, version) {
-  return [
+function buildServiceCompose(app, env) {
+  const { alias, containerPath, dataDir, healthCmd } = app.service
+  const lines = [
+    'services:',
+    '  app:',
+    `    image: ${JSON.stringify(app.image)}`,
+    `    container_name: ourjia_${app.id}`,
+    '    restart: unless-stopped',
+  ]
+  const keys = Object.keys(env)
+  if (keys.length) {
+    lines.push('    environment:')
+    for (const key of keys) {
+      const value = String(env[key]).replace(/\$/g, '$$$$')
+      lines.push(`      ${key}: ${JSON.stringify(value)}`)
+    }
+  }
+  lines.push('    volumes:', `      - ${JSON.stringify(`${dataDir}:${containerPath}`)}`)
+  if (alias) {
+    lines.push('    networks:', '      shared-net:', '        aliases:', `          - ${alias}`)
+  } else {
+    lines.push('    networks:', '      - shared-net')
+  }
+  if (healthCmd) {
+    lines.push(
+      '    healthcheck:',
+      `      test: ["CMD-SHELL", ${JSON.stringify(healthCmd)}]`,
+      '      interval: 10s',
+      '      timeout: 5s',
+      '      retries: 10',
+      '      start_period: 30s',
+    )
+  }
+  lines.push('', 'networks:', '  shared-net:', '    external: true', '')
+  return lines.join('\n')
+}
+
+function buildSampleCompose(app, version) {  return [
     'services:',
     '  app:',
     '    build: .',
@@ -228,6 +271,42 @@ function buildUpScript(app, build) {
   return lines.join('\n')
 }
 
+function buildServiceUpScript(app) {
+  const { dir } = appPaths(app)
+  const { dataDir, dataOwner } = app.service
+  return [
+    'set -e',
+    `mkdir -p ${dataDir}`,
+    `chmod 700 ${dataDir}`,
+    dataOwner
+      ? [
+          `OWNER=${dataOwner}`,
+          `if [ -z "$(ls -A ${dataDir})" ]; then chown -R "$OWNER" ${dataDir}; fi`,
+        ].join('\n')
+      : '',
+    `cd ${dir}`,
+    'docker compose up -d --remove-orphans',
+    'docker compose ps',
+    'cid=$(docker compose ps -q app)',
+    'state=missing',
+    'health=none',
+    'for i in $(seq 1 90); do',
+    '  state=$(docker inspect -f "{{.State.Status}}" "$cid" 2>/dev/null || echo missing)',
+    '  health=$(docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" "$cid" 2>/dev/null || echo none)',
+    '  if [ "$state" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "none" ]; }; then break; fi',
+    '  sleep 2',
+    '  if [ "$i" = "90" ]; then',
+    '    echo "服务未就绪（state=$state health=$health）"',
+    '    docker compose logs --tail 40 || true',
+    '    exit 1',
+    '  fi',
+    'done',
+    'echo "容器状态：$state (health: $health)"',
+  ]
+    .filter((line) => line !== '')
+    .join('\n')
+}
+
 function buildPullScript(app) {
   const { dir } = appPaths(app)
   return ['set -e', `cd ${dir}`, 'docker compose pull'].join('\n')
@@ -284,6 +363,15 @@ async function waitHttps(domain, healthPath, timeoutMs = 90000) {
 
 function deployTips(app, server) {
   const ssh = `ssh -p ${server.port} ${server.user}@${server.host}`
+  if (app.kind === 'service') {
+    return [
+      `查看日志：${ssh} 'cd /srv/apps/${app.id} && docker compose logs --tail 100'`,
+      `健康状态：${ssh} 'docker inspect -f "{{.State.Health.Status}}" ourjia_${app.id}'`,
+      `数据目录：${ssh} 'ls -la ${app.service?.dataDir}'（权限失败时确认所有者 ${app.service?.dataOwner || 'root'}）`,
+      `应用内连接地址：${app.service?.alias || `ourjia_${app.id}`}:${app.runtime.port}`,
+      '共享服务不暴露公网；本地访问可用 SSH 隧道或 docker exec。',
+    ]
+  }
   return [
     `查看应用日志：${ssh} 'cd /srv/apps/${app.id} && docker compose logs --tail 100'`,
     `确认容器状态：${ssh} 'docker ps --filter name=ourjia_${app.id}'`,
@@ -355,6 +443,61 @@ async function deployImage(job, conn, app) {
   return { version: app.image, commit: null }
 }
 
+async function deployService(job, conn, app) {
+  const { dir } = appPaths(app)
+  const { alias, dataDir, containerPath, dataOwner, healthCmd } = app.service
+  const env = readEnv(app)
+
+  updateStep(job, 'config', { status: 'running', startedAt: new Date().toISOString() })
+  job.currentStep = 'config'
+  appendLog(job, `镜像 ${app.image} → 容器端口 ${app.runtime.port}`, 'note')
+  appendLog(job, `数据目录 ${dataDir} → ${containerPath}`, 'note')
+  if (alias) appendLog(job, `网络别名 ${alias}：应用可通过 ${alias}:${app.runtime.port} 访问`, 'note')
+  if (dataOwner) appendLog(job, `数据目录所有者 ${dataOwner}`, 'note')
+  if (healthCmd) appendLog(job, `健康检查：${healthCmd}`, 'note')
+  if (Object.keys(env).length) {
+    appendLog(job, `环境变量：${Object.keys(env).join('、')}（值已隐藏）`, 'note')
+  } else {
+    appendLog(job, '未配置环境变量', 'note')
+  }
+
+  await execScript(conn, `mkdir -p ${dir} && chmod 700 ${dir}`, { timeoutMs: 15000 })
+  const compose = buildServiceCompose(app, env)
+  await sftpWrite(conn, `${dir}/docker-compose.yml`, compose, 0o600)
+  await sftpWrite(
+    conn,
+    `${dir}/release.json`,
+    `${JSON.stringify(
+      {
+        app: app.id,
+        name: app.name,
+        kind: 'service',
+        image: app.image,
+        port: app.runtime.port,
+        alias,
+        dataDir,
+        containerPath,
+        envKeys: Object.keys(env),
+        deployedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    0o644,
+  )
+  appendLog(job, `$ cat ${dir}/docker-compose.yml（环境变量值已隐藏）`, 'cmd')
+  for (const line of maskedCompose(compose).trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
+  updateStep(job, 'config', { status: 'done', finishedAt: new Date().toISOString() })
+
+  await runStep(job, conn, 'pull', buildPullScript(app), 900000, '拉取镜像')
+  flushCarry(job)
+
+  await runStep(job, conn, 'deploy', buildServiceUpScript(app), 300000, '启动共享服务')
+  flushCarry(job)
+
+  return { version: app.image, commit: null }
+}
+
 async function deploySample(job, conn, app) {
   const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ourjia-deploy-'))
   const version = makeVersion()
@@ -408,25 +551,39 @@ async function deploySample(job, conn, app) {
 export async function runDeploy(job, conn, server, app) {
   setJobState(job, 'running')
   try {
-    const result = app.kind === 'image' ? await deployImage(job, conn, app) : await deploySample(job, conn, app)
+    const result =
+      app.kind === 'service'
+        ? await deployService(job, conn, app)
+        : app.kind === 'image'
+          ? await deployImage(job, conn, app)
+          : await deploySample(job, conn, app)
     const { version, commit } = result
 
-    // 外网 HTTPS 证书作为软检查：不阻断部署，但记录警告
-    appendLog(job, `等待 https://${app.domain} 证书就绪…`, 'note')
-    const external = await waitHttps(app.domain, app.runtime.healthPath)
-    if (external.ok) {
-      appendLog(job, `HTTPS 访问正常（HTTP ${external.code}，证书校验通过）`, 'note')
+    let warning = null
+    if (app.kind === 'service') {
+      appendLog(job, '共享服务已启动：只挂在 shared-net，没有公网入口。', 'note')
+      if (app.service?.alias) {
+        appendLog(job, `应用内连接地址：${app.service.alias}:${app.runtime.port}`, 'note')
+      }
     } else {
-      appendLog(
-        job,
-        `⚠ 外网 HTTPS 尚未就绪（${external.error || `HTTP ${external.code}`}）：域名需解析到 ${server.host} 且证书签发成功后才会生效。`,
-        'err',
-      )
+      // 外网 HTTPS 证书作为软检查：不阻断部署，但记录警告
+      appendLog(job, `等待 https://${app.domain} 证书就绪…`, 'note')
+      const external = await waitHttps(app.domain, app.runtime.healthPath)
+      if (external.ok) {
+        appendLog(job, `HTTPS 访问正常（HTTP ${external.code}，证书校验通过）`, 'note')
+      } else {
+        warning = `HTTPS 尚未就绪：${external.error || `HTTP ${external.code}`}`
+        appendLog(
+          job,
+          `⚠ 外网 HTTPS 尚未就绪（${external.error || `HTTP ${external.code}`}）：域名需解析到 ${server.host} 且证书签发成功后才会生效。`,
+          'err',
+        )
+      }
     }
 
     Object.assign(app, {
       status: 'running',
-      warning: external.ok ? null : `HTTPS 尚未就绪：${external.error || `HTTP ${external.code}`}`,
+      warning,
       lastError: null,
       updatedAt: new Date().toISOString(),
       delivery: { version, tag: version, commit, deployedAt: new Date().toISOString() },

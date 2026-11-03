@@ -124,16 +124,25 @@ export interface AppDelivery {
   deployedAt: string | null
 }
 
+export interface AppServiceConfig {
+  alias: string | null
+  dataDir: string
+  containerPath: string
+  dataOwner: string | null
+  healthCmd: string | null
+}
+
 export interface AppRecord {
   id: string
   serverId: string
   name: string
-  domain: string
+  domain: string | null
   image: string | null
   notes: string | null
-  kind: 'sample' | 'image'
+  kind: 'sample' | 'image' | 'service'
   envKeys: string[]
-  runtime: { baseImage?: string; port: number; healthPath: string }
+  service: AppServiceConfig | null
+  runtime: { baseImage?: string; port: number; healthPath: string | null }
   status: 'idle' | 'deploying' | 'running' | 'failed'
   warning: string | null
   lastError: string | null
@@ -144,12 +153,18 @@ export interface AppRecord {
 
 export interface CreateAppPayload {
   serverId: string
+  kind: 'image' | 'service'
   name: string
   image: string
-  domain: string
+  domain?: string
   port: number
   env: string
   notes: string
+  alias?: string
+  dataDir?: string
+  containerPath?: string
+  dataOwner?: string
+  healthCmd?: string
 }
 
 export interface Settings {

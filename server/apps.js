@@ -11,6 +11,8 @@ const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,
 const IMAGE_RE =
   /^(?:[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(?::\d{1,5})?\/)?(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/)*[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[\w][\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+const ALIAS_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+const OWNER_RE = /^\d+:\d+$/
 const NAME_MAX = 40
 const NOTES_MAX = 200
 const ENV_MAX = 50
@@ -84,6 +86,24 @@ export function readEnv(app) {
   }
 }
 
+function normalizeDataDir(raw) {
+  const value = String(raw || '').trim()
+  if (!value) return null
+  if (!/^\/srv\/(data|shared)\/[A-Za-z0-9._/-]+$/.test(value) || value.includes('..')) {
+    throw bad('数据目录需位于 /srv/data 或 /srv/shared 下，且不能包含 ..')
+  }
+  return value.replace(/\/+$/, '')
+}
+
+function normalizeContainerPath(raw) {
+  const value = String(raw || '').trim()
+  if (!value) throw bad('容器内数据路径不能为空')
+  if (!value.startsWith('/') || value.includes('..') || /\s/.test(value)) {
+    throw bad('容器内数据路径需为绝对路径，且不含空格')
+  }
+  return value
+}
+
 export function normalizeAppInput(input = {}) {
   const name = String(input.name || '').trim()
   if (!name) throw bad('应用名称不能为空')
@@ -92,40 +112,71 @@ export function normalizeAppInput(input = {}) {
   const serverId = String(input.serverId || '').trim()
   if (!serverId) throw bad('请选择服务器')
 
-  const domain = String(input.domain || '').trim().toLowerCase()
-  if (!domain) throw bad('域名不能为空')
-  if (!DOMAIN_RE.test(domain)) throw bad('域名格式不合法，例如 demo.example.com')
+  const kind = input.kind === 'service' ? 'service' : 'image'
 
   const image = String(input.image || '').trim()
   if (!image) throw bad('Docker 镜像地址不能为空')
   if (!IMAGE_RE.test(image)) throw bad('镜像地址格式不合法，例如 registry.example.com/team/app:v1')
 
-  const portRaw = input.port === undefined || input.port === null || input.port === '' ? 80 : Number(input.port)
-  if (!Number.isInteger(portRaw) || portRaw < 1 || portRaw > 65535) throw bad('容器端口需为 1-65535')
+  const portRaw = input.port === undefined || input.port === null || input.port === '' ? (kind === 'service' ? 5432 : 80) : Number(input.port)
+  if (!Number.isInteger(portRaw) || portRaw < 1 || portRaw > 65535) throw bad('端口需为 1-65535')
 
   const notes = String(input.notes || '').trim()
   if (notes.length > NOTES_MAX) throw bad(`备注不能超过 ${NOTES_MAX} 个字符`)
 
-  return { name, serverId, domain, image, port: portRaw, notes, env: parseEnvInput(input.env) }
+  let domain = null
+  if (kind === 'image') {
+    domain = String(input.domain || '').trim().toLowerCase()
+    if (!domain) throw bad('域名不能为空')
+    if (!DOMAIN_RE.test(domain)) throw bad('域名格式不合法，例如 demo.example.com')
+  }
+
+  let service = null
+  if (kind === 'service') {
+    const alias = String(input.alias || '').trim().toLowerCase()
+    if (alias && !ALIAS_RE.test(alias)) throw bad('网络别名只能包含小写字母、数字和短横线')
+    const containerPath = normalizeContainerPath(input.containerPath)
+    const dataOwner = String(input.dataOwner || '').trim()
+    if (dataOwner && !OWNER_RE.test(dataOwner)) throw bad('目录所有者格式为 uid:gid，例如 999:999')
+    const healthCmd = String(input.healthCmd || '').trim()
+    if (healthCmd.length > 200) throw bad('健康检查命令过长')
+    if (/[\r\n]/.test(healthCmd)) throw bad('健康检查命令不能包含换行')
+    service = {
+      alias: alias || null,
+      dataDir: normalizeDataDir(input.dataDir),
+      containerPath,
+      dataOwner: dataOwner || null,
+      healthCmd: healthCmd || null,
+    }
+  }
+
+  return { kind, name, serverId, domain, image, port: portRaw, notes, env: parseEnvInput(input.env), service }
 }
 
 export function createApp(input) {
-  const { name, serverId, domain, image, port, notes, env } = normalizeAppInput(input)
-  if (load().some((a) => a.serverId === serverId && a.domain === domain)) {
+  const { kind, name, serverId, domain, image, port, notes, env, service } = normalizeAppInput(input)
+  const list = load()
+  if (kind === 'image' && list.some((a) => a.serverId === serverId && a.domain === domain)) {
     throw bad('该服务器上已有应用使用这个域名')
   }
+  if (kind === 'service' && service.alias) {
+    const dup = list.find((a) => a.serverId === serverId && a.service?.alias === service.alias)
+    if (dup) throw bad(`网络别名 ${service.alias} 已被「${dup.name}」占用`)
+  }
+
   const id = 'app_' + crypto.randomBytes(6).toString('hex')
   const now = new Date().toISOString()
   const rec = {
     id,
     serverId,
     name,
+    kind,
     domain,
     image,
     notes,
-    kind: 'image',
     envEnc: env.length ? encrypt(JSON.stringify(env)) : null,
-    runtime: { port, healthPath: '/' },
+    runtime: { port, healthPath: kind === 'image' ? '/' : null },
+    service: service ? { ...service, dataDir: service.dataDir || `/srv/data/${id}` } : null,
     delivery: { version: null, tag: null, commit: null, deployedAt: null },
     status: 'idle',
     warning: null,
@@ -133,7 +184,7 @@ export function createApp(input) {
     createdAt: now,
     updatedAt: now,
   }
-  load().push(rec)
+  list.push(rec)
   saveApps()
   return rec
 }
@@ -160,12 +211,13 @@ export function publicApp(app) {
     id: app.id,
     serverId: app.serverId,
     name: app.name,
-    domain: app.domain,
+    kind: app.kind || 'sample',
+    domain: app.domain || null,
     image: app.image || null,
     notes: app.notes || null,
-    kind: app.kind,
     envKeys,
     runtime: app.runtime,
+    service: app.service || null,
     status: app.status,
     warning: app.warning,
     lastError: app.lastError,
