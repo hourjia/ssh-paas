@@ -7,8 +7,10 @@ import type {
   JobStep,
   ServerConfig,
   ServerRecord,
+  ServerResources,
 } from '../types'
 import { ConfigModal } from '../components/ConfigModal'
+import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
 import { CheckIcon, ChevronIcon, RefreshIcon, ServerIcon } from '../icons'
 
@@ -19,16 +21,23 @@ interface ServerDetailPageProps {
   onToast: (msg: string) => void
 }
 
-type Tab = 'overview' | 'checks' | 'init' | 'logs'
+type Tab = 'overview' | 'checks' | 'init' | 'resources' | 'logs'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: '概览' },
   { key: 'checks', label: '检查' },
   { key: 'init', label: '初始化' },
+  { key: 'resources', label: '资源' },
   { key: 'logs', label: '日志' },
 ]
 
 const STATUS_TEXT: Record<CheckItem['status'], string> = { ok: '正常', warn: '注意', fail: '失败' }
+
+const DIR_LABEL: Record<'apps' | 'git' | 'data', string> = {
+  apps: '部署目录',
+  git: '交付仓库',
+  data: '数据目录',
+}
 
 function stateBadge(server: ServerRecord) {
   const init = server.init
@@ -68,6 +77,13 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
   const [confirmInit, setConfirmInit] = useState(false)
   const unsubRef = useRef<(() => void) | null>(null)
 
+  const [resources, setResources] = useState<ServerResources | null>(null)
+  const [loadingResources, setLoadingResources] = useState(false)
+  const [resourcesError, setResourcesError] = useState<string | null>(null)
+  const [selectedResources, setSelectedResources] = useState<Set<string>>(new Set())
+  const [cleanupOpen, setCleanupOpen] = useState(false)
+  const [cleaning, setCleaning] = useState(false)
+
   const running = job?.status === 'running' || job?.status === 'pending'
 
   useEffect(() => {
@@ -103,6 +119,68 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
       runCheck(false, true)
     }
   }, [report, checking, checkError, runCheck])
+
+  const loadResources = useCallback(
+    async (quiet = false) => {
+      setLoadingResources(true)
+      setResourcesError(null)
+      try {
+        const data = await api.getServerResources(server.id)
+        setResources(data)
+        setSelectedResources(new Set())
+        if (!quiet) onToast('资源已刷新')
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '资源扫描失败'
+        setResourcesError(msg)
+        onToast(msg)
+      } finally {
+        setLoadingResources(false)
+      }
+    },
+    [server.id, onToast],
+  )
+
+  useEffect(() => {
+    if (tab === 'resources' && !resources && !loadingResources && !resourcesError) {
+      loadResources(true)
+    }
+  }, [tab, resources, loadingResources, resourcesError, loadResources])
+
+  const toggleResource = (key: string) => {
+    setSelectedResources((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectedContainers = useMemo(
+    () => (resources?.orphans.containers || []).filter((c) => selectedResources.has(`c:${c.name}`)),
+    [resources, selectedResources],
+  )
+  const selectedDirs = useMemo(
+    () => (resources?.orphans.dirs || []).filter((d) => selectedResources.has(`d:${d.path}`)),
+    [resources, selectedResources],
+  )
+
+  const runCleanup = useCallback(async () => {
+    if (cleaning) return
+    setCleaning(true)
+    try {
+      await api.cleanupServerResources(server.id, {
+        containers: selectedContainers.map((c) => c.name),
+        paths: selectedDirs.map((d) => d.path),
+      })
+      onToast('孤儿资源已清理')
+      setCleanupOpen(false)
+      await loadResources(true)
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : '清理失败')
+    } finally {
+      setCleaning(false)
+    }
+  }, [cleaning, loadResources, onToast, selectedContainers, selectedDirs, server.id])
 
   const attachStream = useCallback(
     (jobId: string) => {
@@ -433,6 +511,122 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
         </div>
       )}
 
+      {tab === 'resources' && (
+        <div className="panel-stack">
+          <section className="glass-lite panel">
+            <div className="res-head">
+              <div>
+                <h2 className="panel-title">服务器资源</h2>
+                <p className="muted-note">
+                  扫描平台容器与 /srv 下的目录，标出不在应用记录里的资源。
+                  {resources &&
+                    ` 共 ${resources.containers.length} 个容器、${resources.dirs.length} 个目录。`}
+                </p>
+              </div>
+              <button className="btn ghost" onClick={() => loadResources()} disabled={loadingResources}>
+                {loadingResources ? <span className="spinner" /> : <RefreshIcon />}
+                刷新
+              </button>
+            </div>
+            {resourcesError && <div className="form-error">{resourcesError}</div>}
+            {loadingResources && !resources && <p className="muted-note">正在扫描…</p>}
+          </section>
+
+          {resources && (
+            <>
+              <section className="glass-lite panel">
+                <h2 className="panel-title">
+                  孤儿资源
+                  <span className="tab-count bad">
+                    {resources.orphans.containers.length + resources.orphans.dirs.length}
+                  </span>
+                </h2>
+                {resources.orphans.containers.length + resources.orphans.dirs.length === 0 ? (
+                  <p className="muted-note">没有发现孤儿资源。</p>
+                ) : (
+                  <>
+                    <ul className="res-list">
+                      {resources.orphans.containers.map((c) => (
+                        <li key={`c:${c.name}`} className="res-row">
+                          <label className="check-row">
+                            <input
+                              type="checkbox"
+                              checked={selectedResources.has(`c:${c.name}`)}
+                              onChange={() => toggleResource(`c:${c.name}`)}
+                            />
+                            <span>
+                              <span className="res-kind">容器</span>
+                              <span className="mono">{c.name}</span>
+                              <span className="res-meta">
+                                {c.state} · {c.status}
+                              </span>
+                            </span>
+                          </label>
+                        </li>
+                      ))}
+                      {resources.orphans.dirs.map((d) => (
+                        <li key={`d:${d.path}`} className="res-row">
+                          <label className="check-row">
+                            <input
+                              type="checkbox"
+                              checked={selectedResources.has(`d:${d.path}`)}
+                              onChange={() => toggleResource(`d:${d.path}`)}
+                            />
+                            <span>
+                              <span className="res-kind">{DIR_LABEL[d.group]}</span>
+                              <span className="mono">{d.path}</span>
+                            </span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="res-actions">
+                      <button
+                        className="btn danger"
+                        onClick={() => setCleanupOpen(true)}
+                        disabled={!selectedResources.size || cleaning}
+                      >
+                        清理选中（{selectedResources.size}）
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+
+              <section className="glass-lite panel">
+                <h2 className="panel-title">已知资源</h2>
+                {resources.containers.filter((c) => !c.orphan).length === 0 &&
+                resources.dirs.filter((d) => !d.orphan).length === 0 ? (
+                  <p className="muted-note">暂无可识别的应用资源。</p>
+                ) : (
+                  <ul className="res-list">
+                    {resources.containers
+                      .filter((c) => !c.orphan)
+                      .map((c) => (
+                        <li key={`kc:${c.name}`} className="res-row static">
+                          <span className="res-kind">容器</span>
+                          <span className="mono">{c.name}</span>
+                          <span className="res-meta">
+                            {c.state} · 应用 {c.appId}
+                          </span>
+                        </li>
+                      ))}
+                    {resources.dirs
+                      .filter((d) => !d.orphan)
+                      .map((d) => (
+                        <li key={`kd:${d.path}`} className="res-row static">
+                          <span className="res-kind">{DIR_LABEL[d.group]}</span>
+                          <span className="mono">{d.path}</span>
+                        </li>
+                      ))}
+                  </ul>
+                )}
+              </section>
+            </>
+          )}
+        </div>
+      )}
+
       {tab === 'logs' && (
         <div className="panel-stack">
           <section className="glass-lite panel">
@@ -450,6 +644,43 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
           </section>
         </div>
       )}
+
+      <Modal open={cleanupOpen} onClose={() => !cleaning && setCleanupOpen(false)} title="清理孤儿资源">
+        <div className="form-grid">
+          <p className="confirm-lede">以下资源会从服务器删除，且不可恢复：</p>
+          <ul className="res-confirm">
+            {selectedContainers.map((c) => (
+              <li key={`c:${c.name}`}>
+                <span className="res-kind">容器</span>
+                <span className="mono">{c.name}</span>
+              </li>
+            ))}
+            {selectedDirs.map((d) => (
+              <li key={`d:${d.path}`}>
+                <span className="res-kind">{DIR_LABEL[d.group]}</span>
+                <span className="mono">{d.path}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="form-hint">
+            容器会执行 docker rm -f，目录会执行 rm -rf。删除数据目录前请确认没有需要保留的数据；属于现有应用的资源不会被允许清理。
+          </p>
+          <div className="modal-foot">
+            <button className="btn ghost" onClick={() => setCleanupOpen(false)} disabled={cleaning}>
+              取消
+            </button>
+            <button className="btn danger" onClick={runCleanup} disabled={cleaning}>
+              {cleaning ? (
+                <>
+                  <span className="spinner" /> 清理中…
+                </>
+              ) : (
+                '确认清理'
+              )}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       <ConfigModal
         open={configOpen}

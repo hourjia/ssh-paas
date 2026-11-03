@@ -108,6 +108,30 @@ export interface ServerRecord {
   lastCheckAt: string | null
 }
 
+export interface ResourceContainer {
+  name: string
+  appId: string
+  state: string
+  status: string
+  orphan: boolean
+}
+
+export interface ResourceDir {
+  group: 'apps' | 'git' | 'data'
+  name: string
+  path: string
+  appId: string
+  orphan: boolean
+}
+
+export interface ServerResources {
+  apps: { id: string; name: string; kind: string; status: string }[]
+  containers: ResourceContainer[]
+  dirs: ResourceDir[]
+  orphans: { containers: ResourceContainer[]; dirs: ResourceDir[] }
+  scannedAt: string
+}
+
 export interface AddServerPayload {
   address: string
   port?: number

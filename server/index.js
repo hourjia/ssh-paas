@@ -10,6 +10,7 @@ import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLo
 import { runInit, planSteps } from './init.js'
 import { getApps, findApp, createApp, deleteApp, publicApp, saveApps, buildCleanupScript } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
+import { scanServerResources, buildResourceCleanupScript } from './resources.js'
 
 const PORT = Number(process.env.PORT) || 8787
 const now = () => new Date().toISOString()
@@ -363,6 +364,46 @@ app.post('/api/apps/:id/deploy', wrap(async (req, res) => {
       releaseLock(server.id)
     }
   })()
+}))
+
+app.get('/api/servers/:id/resources', wrap(async (req, res) => {
+  const rec = findServer(req.params.id)
+  if (!rec) throw badRequest('服务器不存在')
+  const serverApps = getApps().filter((a) => a.serverId === rec.id)
+  const data = await withConnection(rec, (conn) => scanServerResources(conn, serverApps))
+  res.json(data)
+}))
+
+app.post('/api/servers/:id/resources/cleanup', wrap(async (req, res) => {
+  const rec = findServer(req.params.id)
+  if (!rec) throw badRequest('服务器不存在')
+  if (jobLocked(rec.id)) throw badRequest('该服务器有进行中的任务，请等待完成后再清理')
+
+  const containers = Array.isArray(req.body?.containers) ? req.body.containers.map(String) : []
+  const paths = Array.isArray(req.body?.paths) ? req.body.paths.map(String) : []
+  if (!containers.length && !paths.length) throw badRequest('没有选中要清理的资源')
+
+  // 清理前重新扫描，只允许删除当前确实属于孤儿的资源
+  const serverApps = getApps().filter((a) => a.serverId === rec.id)
+  const scanned = await withConnection(rec, (conn) => scanServerResources(conn, serverApps))
+  const orphanContainers = new Set(scanned.orphans.containers.map((c) => c.name))
+  const orphanPaths = new Set(scanned.orphans.dirs.map((d) => d.path))
+  for (const name of containers) {
+    if (!orphanContainers.has(name)) throw badRequest(`容器 ${name} 不是孤儿资源，已拒绝清理`)
+  }
+  for (const path of paths) {
+    if (!orphanPaths.has(path)) throw badRequest(`目录 ${path} 不是孤儿资源，已拒绝清理`)
+  }
+
+  const script = buildResourceCleanupScript({ containers, paths })
+  const detail = await withConnection(rec, async (conn) => {
+    const result = await execScript(conn, script, { timeoutMs: 120000 })
+    if (result.code !== 0) {
+      throw new Error(`清理失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+    }
+    return result.stdout.trim()
+  })
+  res.json({ ok: true, removed: { containers, paths }, detail })
 }))
 
 app.get('/api/jobs/:id', wrap((req, res) => {

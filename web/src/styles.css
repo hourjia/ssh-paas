@@ -642,3 +642,12 @@ select{cursor:pointer}
 .check-row code{font-family:var(--font-mono);font-size:12px;color:var(--text-3);margin-left:6px}
 .check-row.danger{color:var(--st-err)}
 .btn.danger{background:var(--st-err);border-color:transparent;color:#fff}
+.res-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.res-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.res-row{padding:10px 12px;border:1px solid var(--stroke-lo);border-radius:12px}
+.res-row.static{display:flex;gap:10px;align-items:center;flex-wrap:wrap;color:var(--text-2);font-size:13px}
+.res-kind{display:inline-block;font-size:11px;color:var(--text-3);background:var(--accent-soft);padding:1px 6px;border-radius:5px;margin-right:8px}
+.res-meta{margin-left:10px;font-size:12px;color:var(--text-3)}
+.res-actions{display:flex;justify-content:flex-end;margin-top:14px}
+.res-confirm{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.res-confirm li{display:flex;align-items:center;gap:4px}

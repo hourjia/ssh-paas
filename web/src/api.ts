@@ -6,6 +6,7 @@ import type {
   JobSnapshot,
   ServerConfig,
   ServerRecord,
+  ServerResources,
 } from './types'
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -92,6 +93,17 @@ export function deployApp(id: string) {
     method: 'POST',
     body: JSON.stringify({}),
   })
+}
+
+export function getServerResources(id: string) {
+  return request<ServerResources>(`/api/servers/${id}/resources`)
+}
+
+export function cleanupServerResources(id: string, payload: { containers: string[]; paths: string[] }) {
+  return request<{ ok: boolean; removed: { containers: string[]; paths: string[] }; detail: string }>(
+    `/api/servers/${id}/resources/cleanup`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
 }
 
 const TERMINAL = new Set(['done', 'failed', 'interrupted'])
