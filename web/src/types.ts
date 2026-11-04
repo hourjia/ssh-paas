@@ -156,6 +156,29 @@ export interface AppServiceConfig {
   healthCmd: string | null
 }
 
+export interface AppTemplateEnv {
+  key: string
+  value?: string
+  template?: string
+}
+
+export interface AppTemplate {
+  id: string
+  label: string
+  kind: 'image' | 'service'
+  description: string
+  defaults: {
+    image?: string
+    port?: number
+    healthPath?: string
+    alias?: string
+    containerPath?: string
+    healthCmd?: string
+    volumes?: AppVolumeInput[]
+  }
+  env: AppTemplateEnv[]
+}
+
 export interface AppVolume {
   name: string
   hostPath?: string

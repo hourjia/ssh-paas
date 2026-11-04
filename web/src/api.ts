@@ -1,6 +1,7 @@
 import type {
   AddServerPayload,
   AppRecord,
+  AppTemplate,
   CheckReport,
   CreateAppPayload,
   JobSnapshot,
@@ -72,6 +73,10 @@ export function getJob(id: string) {
 
 export function listApps() {
   return request<{ apps: AppRecord[] }>('/api/apps')
+}
+
+export function listTemplates() {
+  return request<{ templates: AppTemplate[] }>('/api/templates')
 }
 
 export function createApp(payload: CreateAppPayload) {

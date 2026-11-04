@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api'
-import type { AppRecord, ServerRecord, UpdateAppPayload } from '../types'
+import type { AppRecord, AppTemplate, ServerRecord, UpdateAppPayload } from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
 import { ContainerIcon, DeployIcon, PlusIcon } from '../icons'
@@ -35,25 +35,6 @@ const EMPTY_FORM = {
   healthCmd: '',
 }
 
-const POSTGRES_PRESET = {
-  image: 'postgres:16-alpine',
-  port: '5432',
-  alias: 'postgres',
-  containerPath: '/var/lib/postgresql/data',
-  dataOwner: '',
-  healthCmd: 'pg_isready -U appuser -d appdb',
-  env: 'POSTGRES_DB=appdb\nPOSTGRES_USER=appuser\nPOSTGRES_PASSWORD=change-me',
-}
-
-const REDIS_PRESET = {
-  image: 'redis:7-alpine',
-  port: '6379',
-  alias: 'redis',
-  containerPath: '/data',
-  dataOwner: '',
-  healthCmd: 'redis-cli ping',
-}
-
 function randomPassword() {
   const bytes = crypto.getRandomValues(new Uint8Array(24))
   return Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
@@ -78,6 +59,8 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [mediaUrl, setMediaUrl] = useState('/media/')
   const [mediaOwner, setMediaOwner] = useState('')
   const [editing, setEditing] = useState<AppRecord | null>(null)
+  const [templates, setTemplates] = useState<AppTemplate[]>([])
+  const [templateId, setTemplateId] = useState<string | null>(null)
 
   const [deleteTarget, setDeleteTarget] = useState<AppRecord | null>(null)
   const [cleanup, setCleanup] = useState(true)
@@ -99,6 +82,15 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     load()
     return () => unsubRef.current?.()
   }, [load])
+
+  useEffect(() => {
+    api
+      .listTemplates()
+      .then(({ templates: list }) => setTemplates(list))
+      .catch(() => {
+        /* 模板加载失败时仍可手动填写 */
+      })
+  }, [])
 
   useEffect(() => {
     if (!createOpen) return
@@ -176,34 +168,32 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setForm((cur) => ({ ...cur, [key]: value }))
   }
 
-  const applyPostgres = () => {
-    setKind('service')
+  const applyTemplate = (template: AppTemplate) => {
+    setTemplateId(template.id)
+    setKind(template.kind)
     setForm((cur) => ({
-      ...cur,
-      name: cur.name || 'postgres',
-      image: POSTGRES_PRESET.image,
-      port: POSTGRES_PRESET.port,
-      alias: cur.alias || POSTGRES_PRESET.alias,
-      containerPath: POSTGRES_PRESET.containerPath,
-      dataOwner: POSTGRES_PRESET.dataOwner,
-      healthCmd: POSTGRES_PRESET.healthCmd,
-      env: cur.env.trim() ? cur.env : POSTGRES_PRESET.env,
+      ...EMPTY_FORM,
+      name: cur.name,
+      domain: cur.domain,
+      notes: cur.notes,
+      image: template.defaults.image || '',
+      port: String(template.defaults.port ?? (template.kind === 'service' ? 5432 : 80)),
+      alias: template.defaults.alias || '',
+      containerPath: template.defaults.containerPath || '',
+      healthCmd: template.defaults.healthCmd || '',
+      env: template.env.map((e) => `${e.key}=${e.value ?? e.template ?? ''}`).join('\n'),
     }))
-  }
-
-  const applyRedis = () => {
-    setKind('service')
-    setForm((cur) => ({
-      ...cur,
-      name: cur.name || 'redis',
-      image: REDIS_PRESET.image,
-      port: REDIS_PRESET.port,
-      alias: cur.alias || REDIS_PRESET.alias,
-      containerPath: REDIS_PRESET.containerPath,
-      dataOwner: REDIS_PRESET.dataOwner,
-      healthCmd: REDIS_PRESET.healthCmd,
-      env: cur.env,
-    }))
+    if (template.kind === 'image') {
+      setHealthPath(template.defaults.healthPath || '/')
+      const volume = template.defaults.volumes?.[0]
+      setMediaEnabled(Boolean(volume))
+      setMediaMount(volume?.mountPath || '/data/media')
+      setMediaUrl(volume?.serveUrl || '/media/')
+      setMediaOwner('')
+    } else {
+      setHealthPath('/')
+      setMediaEnabled(false)
+    }
   }
 
   const fillPassword = () => {
@@ -264,6 +254,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setCreating(true)
     setFormError(null)
     try {
+      const envText = form.env.replaceAll('{{domain}}', form.domain.trim())
       const volumes =
         kind === 'image' && mediaEnabled
           ? [
@@ -286,7 +277,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
           healthPath,
           volumes,
         }
-        if (form.env.trim()) payload.env = form.env
+        if (form.env.trim()) payload.env = envText
         const { app } = await api.updateApp(editing.id, payload)
         setApps((prev) => prev.map((a) => (a.id === app.id ? app : a)))
         closeForm()
@@ -301,7 +292,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         image: form.image.trim(),
         domain: kind === 'image' ? form.domain.trim() : undefined,
         port: Number(form.port) || (kind === 'service' ? 5432 : 80),
-        env: form.env,
+        env: envText,
         notes: form.notes.trim(),
         healthPath: kind === 'image' ? healthPath : undefined,
         volumes,
@@ -468,25 +459,49 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         <div className="form-grid">
           {!editing && (
             <div className="segmented">
-              <button type="button" className={kind === 'image' ? 'active' : ''} onClick={() => setKind('image')}>
+              <button
+                type="button"
+                className={kind === 'image' ? 'active' : ''}
+                onClick={() => {
+                  setKind('image')
+                  setTemplateId(null)
+                }}
+              >
                 Web 应用
               </button>
-              <button type="button" className={kind === 'service' ? 'active' : ''} onClick={() => setKind('service')}>
+              <button
+                type="button"
+                className={kind === 'service' ? 'active' : ''}
+                onClick={() => {
+                  setKind('service')
+                  setTemplateId(null)
+                }}
+              >
                 共享服务
               </button>
             </div>
           )}
 
-          {!editing && kind === 'service' && (
+          {!editing && (
             <div className="preset-row">
-              <span className="form-hint">预设：</span>
-              <button type="button" className="link-btn" onClick={applyPostgres}>
-                PostgreSQL 16
-              </button>
-              <button type="button" className="link-btn" onClick={applyRedis}>
-                Redis 7
-              </button>
+              <span className="form-hint">模板：</span>
+              {templates
+                .filter((t) => t.kind === kind)
+                .map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className={`link-btn${templateId === t.id ? ' active' : ''}`}
+                    onClick={() => applyTemplate(t)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              {templates.length === 0 && <span className="form-hint">加载中…</span>}
             </div>
+          )}
+          {!editing && templateId && (
+            <p className="form-hint">{templates.find((t) => t.id === templateId)?.description}</p>
           )}
 
           <div className="field">

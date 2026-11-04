@@ -11,6 +11,7 @@ import { runInit, planSteps } from './init.js'
 import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
 import { scanServerResources, buildResourceCleanupScript } from './resources.js'
+import { listTemplates } from './templates.js'
 
 const PORT = Number(process.env.PORT) || 8787
 const now = () => new Date().toISOString()
@@ -293,6 +294,10 @@ app.post('/api/servers/:id/init', wrap(async (req, res) => {
       saveServers()
     }
   })()
+}))
+
+app.get('/api/templates', wrap((_req, res) => {
+  res.json({ templates: listTemplates() })
 }))
 
 app.get('/api/apps', wrap((_req, res) => {
