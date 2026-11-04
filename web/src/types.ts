@@ -156,6 +156,14 @@ export interface AppServiceConfig {
   healthCmd: string | null
 }
 
+export interface AppVolume {
+  name: string
+  hostPath?: string
+  mountPath: string
+  serveUrl: string | null
+  owner: string | null
+}
+
 export interface AppRecord {
   id: string
   serverId: string
@@ -165,6 +173,7 @@ export interface AppRecord {
   notes: string | null
   kind: 'image' | 'service'
   envKeys: string[]
+  volumes: AppVolume[]
   service: AppServiceConfig | null
   runtime: { baseImage?: string; port: number; healthPath: string | null }
   status: 'idle' | 'deploying' | 'running' | 'failed'
@@ -182,13 +191,33 @@ export interface CreateAppPayload {
   image: string
   domain?: string
   port: number
-  env: string
+  env?: string
   notes: string
+  healthPath?: string
+  volumes?: AppVolumeInput[]
   alias?: string
   dataDir?: string
   containerPath?: string
   dataOwner?: string
   healthCmd?: string
+}
+
+export interface AppVolumeInput {
+  name: string
+  mountPath: string
+  serveUrl?: string | null
+  owner?: string | null
+}
+
+export interface UpdateAppPayload {
+  name?: string
+  image?: string
+  domain?: string
+  port?: number
+  env?: string
+  notes?: string
+  healthPath?: string
+  volumes?: AppVolumeInput[]
 }
 
 export interface Settings {

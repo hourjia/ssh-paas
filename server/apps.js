@@ -104,6 +104,42 @@ function normalizeContainerPath(raw) {
   return value
 }
 
+function normalizeHealthPath(raw) {
+  const value = String(raw || '/').trim() || '/'
+  if (!value.startsWith('/') || /\s/.test(value) || value.length > 200) {
+    throw bad('健康检查路径需以 / 开头，且不含空格')
+  }
+  return value
+}
+
+function normalizeVolumes(raw) {
+  if (raw === undefined || raw === null || raw === '') return []
+  if (!Array.isArray(raw)) throw bad('数据卷配置格式不正确')
+  if (raw.length > 5) throw bad('数据卷最多 5 个')
+  const names = new Set()
+  const urls = new Set()
+  return raw.map((item) => {
+    const name = String(item?.name || 'media').trim().toLowerCase()
+    if (!/^[a-z0-9][a-z0-9-]{0,19}$/.test(name)) throw bad('数据卷名称只能包含小写字母、数字和短横线')
+    if (names.has(name)) throw bad(`数据卷名称重复：${name}`)
+    names.add(name)
+
+    const mountPath = normalizeContainerPath(item?.mountPath)
+    const serveUrl = String(item?.serveUrl || '').trim()
+    if (serveUrl) {
+      if (!/^\/[A-Za-z0-9._/-]*\/$/.test(serveUrl) || serveUrl.includes('..')) {
+        throw bad('媒体 URL 需以 / 开头和结尾，例如 /media/')
+      }
+      if (urls.has(serveUrl)) throw bad(`媒体 URL 重复：${serveUrl}`)
+      urls.add(serveUrl)
+    }
+    const owner = String(item?.owner || '').trim()
+    if (owner && !OWNER_RE.test(owner)) throw bad('数据卷所有者格式为 uid:gid，例如 1000:1000')
+
+    return { name, mountPath, serveUrl: serveUrl || null, owner: owner || null }
+  })
+}
+
 export function normalizeAppInput(input = {}) {
   const name = String(input.name || '').trim()
   if (!name) throw bad('应用名称不能为空')
@@ -150,11 +186,18 @@ export function normalizeAppInput(input = {}) {
     }
   }
 
-  return { kind, name, serverId, domain, image, port: portRaw, notes, env: parseEnvInput(input.env), service }
+  let healthPath = null
+  let volumes = []
+  if (kind === 'image') {
+    healthPath = normalizeHealthPath(input.healthPath)
+    volumes = normalizeVolumes(input.volumes)
+  }
+
+  return { kind, name, serverId, domain, image, port: portRaw, notes, env: parseEnvInput(input.env), service, healthPath, volumes }
 }
 
 export function createApp(input) {
-  const { kind, name, serverId, domain, image, port, notes, env, service } = normalizeAppInput(input)
+  const { kind, name, serverId, domain, image, port, notes, env, service, healthPath, volumes } = normalizeAppInput(input)
   const list = load()
   if (kind === 'image' && list.some((a) => a.serverId === serverId && a.domain === domain)) {
     throw bad('该服务器上已有应用使用这个域名')
@@ -175,7 +218,15 @@ export function createApp(input) {
     image,
     notes,
     envEnc: env.length ? encrypt(JSON.stringify(env)) : null,
-    runtime: { port, healthPath: kind === 'image' ? '/' : null },
+    runtime: { port, healthPath: kind === 'image' ? healthPath : null },
+    volumes:
+      kind === 'image'
+        ? volumes.map((v) => ({
+            ...v,
+            hostPath: `/srv/data/${id}/${v.name}`,
+            readOnly: false,
+          }))
+        : [],
     service: service ? { ...service, dataDir: service.dataDir || `/srv/data/${id}` } : null,
     delivery: { version: null, tag: null, commit: null, deployedAt: null },
     status: 'idle',
@@ -217,6 +268,7 @@ export function publicApp(app) {
     notes: app.notes || null,
     envKeys,
     runtime: app.runtime,
+    volumes: app.volumes || [],
     service: app.service || null,
     status: app.status,
     warning: app.warning,
@@ -243,15 +295,81 @@ export function buildCleanupScript(app, removeData = false) {
     '  (cd "$DIR" && docker compose down --remove-orphans) || true',
     'fi',
     `docker rm -f ourjia_${app.id} >/dev/null 2>&1 || true`,
+    `docker rm -f ourjia_${app.id}_media >/dev/null 2>&1 || true`,
     'rm -rf "$DIR"',
   ]
-  if (removeData && app.kind === 'service' && app.service?.dataDir) {
-    const dataDir = app.service.dataDir
-    if (!/^\/srv\/(data|shared)\/[A-Za-z0-9._/-]+$/.test(dataDir) || dataDir.includes('..')) {
-      throw bad('数据目录不合法，已拒绝删除')
+  if (removeData) {
+    const dirs = new Set()
+    if (app.kind === 'image') {
+      // 所有媒体卷都在 /srv/data/<appId>/ 下，直接删父目录
+      dirs.add(`/srv/data/${app.id}`)
+    } else if (app.service?.dataDir) {
+      dirs.add(app.service.dataDir)
     }
-    lines.push(`rm -rf ${dataDir}`)
+    for (const dataDir of dirs) {
+      if (!/^\/srv\/(data|shared)\/[A-Za-z0-9._/-]+$/.test(dataDir) || dataDir.includes('..')) {
+        throw bad('数据目录不合法，已拒绝删除')
+      }
+      lines.push(`rm -rf ${dataDir}`)
+    }
   }
   lines.push('echo "已清理容器与部署目录"')
   return lines.join('\n')
 }
+
+export function updateApp(app, input = {}) {
+  if (app.kind !== 'image') throw bad('共享服务暂不支持编辑，请删除后重建')
+
+  const list = load()
+  const name = input.name !== undefined ? String(input.name).trim() : app.name
+  if (!name) throw bad('应用名称不能为空')
+  if (name.length > NAME_MAX) throw bad(`应用名称不能超过 ${NAME_MAX} 个字符`)
+
+  const image = input.image !== undefined ? String(input.image).trim() : app.image
+  if (!IMAGE_RE.test(image)) throw bad('镜像地址格式不合法，例如 registry.example.com/team/app:v1')
+
+  const domain = input.domain !== undefined ? String(input.domain).trim().toLowerCase() : app.domain
+  if (!DOMAIN_RE.test(domain)) throw bad('域名格式不合法，例如 demo.example.com')
+  if (list.some((a) => a.id !== app.id && a.serverId === app.serverId && a.domain === domain)) {
+    throw bad('该服务器上已有应用使用这个域名')
+  }
+
+  const port =
+    input.port !== undefined && input.port !== null && input.port !== ''
+      ? Number(input.port)
+      : app.runtime?.port || 80
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw bad('端口需为 1-65535')
+
+  const healthPath = input.healthPath !== undefined ? normalizeHealthPath(input.healthPath) : app.runtime?.healthPath || '/'
+  const notes = input.notes !== undefined ? String(input.notes).trim() : app.notes || ''
+  if (notes.length > NOTES_MAX) throw bad(`备注不能超过 ${NOTES_MAX} 个字符`)
+
+  let volumes = app.volumes || []
+  if (input.volumes !== undefined) {
+    const normalized = normalizeVolumes(input.volumes)
+    const existing = new Map((app.volumes || []).map((v) => [v.name, v]))
+    volumes = normalized.map((v) => ({
+      ...v,
+      hostPath: existing.get(v.name)?.hostPath || `/srv/data/${app.id}/${v.name}`,
+      readOnly: false,
+    }))
+  }
+
+  if (input.env !== undefined) {
+    const env = parseEnvInput(input.env)
+    app.envEnc = env.length ? encrypt(JSON.stringify(env)) : null
+  }
+
+  Object.assign(app, {
+    name,
+    image,
+    domain,
+    notes,
+    volumes,
+    runtime: { ...app.runtime, port, healthPath },
+    updatedAt: new Date().toISOString(),
+  })
+  saveApps()
+  return app
+}
+

@@ -7,6 +7,7 @@ import type {
   ServerConfig,
   ServerRecord,
   ServerResources,
+  UpdateAppPayload,
 } from './types'
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -92,6 +93,13 @@ export function deployApp(id: string) {
   return request<{ job: JobSnapshot; app: AppRecord }>(`/api/apps/${id}/deploy`, {
     method: 'POST',
     body: JSON.stringify({}),
+  })
+}
+
+export function updateApp(id: string, payload: UpdateAppPayload) {
+  return request<{ app: AppRecord }>(`/api/apps/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
   })
 }
 

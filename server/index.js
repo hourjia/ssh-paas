@@ -8,7 +8,7 @@ import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
-import { getApps, findApp, createApp, deleteApp, publicApp, saveApps, buildCleanupScript } from './apps.js'
+import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
 import { scanServerResources, buildResourceCleanupScript } from './resources.js'
 
@@ -304,6 +304,14 @@ app.post('/api/apps', wrap((req, res) => {
   if (!server) throw badRequest('服务器不存在')
   const rec = createApp({ ...req.body, serverId: server.id })
   res.json({ app: publicApp(rec) })
+}))
+
+app.put('/api/apps/:id', wrap((req, res) => {
+  const rec = findApp(req.params.id)
+  if (!rec) throw badRequest('应用不存在')
+  if (jobLocked(rec.serverId)) throw badRequest('该服务器有进行中的任务，请等待完成后再修改')
+  const updated = updateApp(rec, req.body || {})
+  res.json({ app: publicApp(updated) })
 }))
 
 app.delete('/api/apps/:id', wrap(async (req, res) => {

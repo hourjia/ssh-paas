@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api'
-import type { AppRecord, ServerRecord } from '../types'
+import type { AppRecord, ServerRecord, UpdateAppPayload } from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
 import { ContainerIcon, DeployIcon, PlusIcon } from '../icons'
@@ -72,6 +72,12 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [serverId, setServerId] = useState('')
   const [creating, setCreating] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [healthPath, setHealthPath] = useState('/')
+  const [mediaEnabled, setMediaEnabled] = useState(false)
+  const [mediaMount, setMediaMount] = useState('/data/media')
+  const [mediaUrl, setMediaUrl] = useState('/media/')
+  const [mediaOwner, setMediaOwner] = useState('')
+  const [editing, setEditing] = useState<AppRecord | null>(null)
 
   const [deleteTarget, setDeleteTarget] = useState<AppRecord | null>(null)
   const [cleanup, setCleanup] = useState(true)
@@ -212,15 +218,82 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     onToast('已生成随机密码，请记得保存')
   }
 
+  const resetForm = () => {
+    setForm(EMPTY_FORM)
+    setHealthPath('/')
+    setMediaEnabled(false)
+    setMediaMount('/data/media')
+    setMediaUrl('/media/')
+    setMediaOwner('')
+  }
+
+  const openEdit = (app: AppRecord) => {
+    setEditing(app)
+    setKind('image')
+    setFormError(null)
+    setForm({
+      ...EMPTY_FORM,
+      name: app.name,
+      image: app.image || '',
+      domain: app.domain || '',
+      port: String(app.runtime.port),
+      env: '',
+      notes: app.notes || '',
+    })
+    setHealthPath(app.runtime.healthPath || '/')
+    const volume = app.volumes?.[0]
+    setMediaEnabled(Boolean(volume))
+    setMediaMount(volume?.mountPath || '/data/media')
+    setMediaUrl(volume?.serveUrl || '/media/')
+    setMediaOwner(volume?.owner || '')
+  }
+
+  const closeForm = () => {
+    setEditing(null)
+    resetForm()
+    setFormError(null)
+    onCloseCreate()
+  }
+
   const submit = useCallback(async () => {
     if (creating) return
-    if (!serverId) {
+    if (!editing && !serverId) {
       setFormError('请先添加服务器')
       return
     }
     setCreating(true)
     setFormError(null)
     try {
+      const volumes =
+        kind === 'image' && mediaEnabled
+          ? [
+              {
+                name: 'media',
+                mountPath: mediaMount.trim(),
+                serveUrl: mediaUrl.trim() || null,
+                owner: mediaOwner.trim() || null,
+              },
+            ]
+          : []
+
+      if (editing) {
+        const payload: UpdateAppPayload = {
+          name: form.name.trim(),
+          image: form.image.trim(),
+          domain: form.domain.trim(),
+          port: Number(form.port) || 80,
+          notes: form.notes.trim(),
+          healthPath,
+          volumes,
+        }
+        if (form.env.trim()) payload.env = form.env
+        const { app } = await api.updateApp(editing.id, payload)
+        setApps((prev) => prev.map((a) => (a.id === app.id ? app : a)))
+        closeForm()
+        onToast('配置已保存，重新部署后生效')
+        return
+      }
+
       const { app } = await api.createApp({
         serverId,
         kind,
@@ -230,6 +303,8 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         port: Number(form.port) || (kind === 'service' ? 5432 : 80),
         env: form.env,
         notes: form.notes.trim(),
+        healthPath: kind === 'image' ? healthPath : undefined,
+        volumes,
         alias: kind === 'service' ? form.alias.trim() : undefined,
         dataDir: kind === 'service' ? form.dataDir.trim() || undefined : undefined,
         containerPath: kind === 'service' ? form.containerPath.trim() : undefined,
@@ -237,15 +312,14 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         healthCmd: kind === 'service' ? form.healthCmd.trim() : undefined,
       })
       setApps((prev) => [app, ...prev])
-      setForm(EMPTY_FORM)
-      onCloseCreate()
+      closeForm()
       onToast(kind === 'service' ? '共享服务已创建，可以开始部署' : '应用已创建，可以开始部署')
     } catch (e) {
-      setFormError(e instanceof Error ? e.message : '创建失败')
+      setFormError(e instanceof Error ? e.message : editing ? '保存失败' : '创建失败')
     } finally {
       setCreating(false)
     }
-  }, [creating, form, kind, onCloseCreate, onToast, serverId])
+  }, [creating, editing, form, kind, healthPath, mediaEnabled, mediaMount, mediaOwner, mediaUrl, onCloseCreate, onToast, serverId])
 
   return (
     <div className="apps-page">
@@ -344,6 +418,11 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
 
                 {app.notes && <p className="app-notes">{app.notes}</p>}
                 {app.envKeys.length > 0 && <p className="app-notes">环境变量：{app.envKeys.join('、')}</p>}
+                {app.volumes?.some((v) => v.serveUrl) && (
+                  <p className="app-notes">
+                    媒体：{app.volumes.filter((v) => v.serveUrl).map((v) => v.serveUrl).join('、')}
+                  </p>
+                )}
                 {app.warning && <p className="app-note warn">{app.warning}</p>}
                 {app.lastError && <p className="app-note err">{app.lastError}</p>}
 
@@ -359,6 +438,11 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                       </>
                     )}
                   </button>
+                  {!isService && (
+                    <button className="btn ghost sm" onClick={() => openEdit(app)} disabled={deploying}>
+                      编辑
+                    </button>
+                  )}
                   <button className="btn ghost sm" onClick={() => askRemove(app)} disabled={deploying}>
                     删除
                   </button>
@@ -376,18 +460,24 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         </section>
       )}
 
-      <Modal open={createOpen} onClose={onCloseCreate} title="新建应用">
+      <Modal
+        open={createOpen || Boolean(editing)}
+        onClose={closeForm}
+        title={editing ? `编辑 · ${editing.name}` : '新建应用'}
+      >
         <div className="form-grid">
-          <div className="segmented">
-            <button type="button" className={kind === 'image' ? 'active' : ''} onClick={() => setKind('image')}>
-              Web 应用
-            </button>
-            <button type="button" className={kind === 'service' ? 'active' : ''} onClick={() => setKind('service')}>
-              共享服务
-            </button>
-          </div>
+          {!editing && (
+            <div className="segmented">
+              <button type="button" className={kind === 'image' ? 'active' : ''} onClick={() => setKind('image')}>
+                Web 应用
+              </button>
+              <button type="button" className={kind === 'service' ? 'active' : ''} onClick={() => setKind('service')}>
+                共享服务
+              </button>
+            </div>
+          )}
 
-          {kind === 'service' && (
+          {!editing && kind === 'service' && (
             <div className="preset-row">
               <span className="form-hint">预设：</span>
               <button type="button" className="link-btn" onClick={applyPostgres}>
@@ -418,29 +508,71 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             </p>
           </div>
 
-          <div className="field">
-            <label>服务器</label>
-            <select value={serverId} onChange={(e) => setServerId(e.target.value)}>
-              {servers.length === 0 && <option value="">请先添加服务器</option>}
-              {servers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}（{s.host}）
-                </option>
-              ))}
-            </select>
-          </div>
+          {!editing && (
+            <div className="field">
+              <label>服务器</label>
+              <select value={serverId} onChange={(e) => setServerId(e.target.value)}>
+                {servers.length === 0 && <option value="">请先添加服务器</option>}
+                {servers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}（{s.host}）
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {kind === 'image' ? (
-            <div className="field-row-split">
-              <div className="field">
-                <label>域名</label>
-                <input value={form.domain} onChange={(e) => setField('domain', e.target.value)} placeholder="app.example.com" />
+            <>
+              <div className="field-row-split">
+                <div className="field">
+                  <label>域名</label>
+                  <input value={form.domain} onChange={(e) => setField('domain', e.target.value)} placeholder="app.example.com" />
+                </div>
+                <div className="field">
+                  <label>容器端口</label>
+                  <input type="number" min={1} max={65535} value={form.port} onChange={(e) => setField('port', e.target.value)} />
+                </div>
               </div>
+
               <div className="field">
-                <label>容器端口</label>
-                <input type="number" min={1} max={65535} value={form.port} onChange={(e) => setField('port', e.target.value)} />
+                <label>健康检查路径</label>
+                <input value={healthPath} onChange={(e) => setHealthPath(e.target.value)} placeholder="/" />
+                <p className="form-hint">部署后按此路径经 Traefik 检查，应返回 2xx/3xx；默认 /。</p>
               </div>
-            </div>
+
+              <div className="field">
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={mediaEnabled}
+                    onChange={(e) => setMediaEnabled(e.target.checked)}
+                  />
+                  <span>媒体目录（上传文件持久化，并由 nginx 提供访问）</span>
+                </label>
+                {mediaEnabled && (
+                  <>
+                    <div className="field-row-split">
+                      <div className="field">
+                        <label>容器内路径</label>
+                        <input value={mediaMount} onChange={(e) => setMediaMount(e.target.value)} placeholder="/data/media" />
+                      </div>
+                      <div className="field">
+                        <label>访问 URL</label>
+                        <input value={mediaUrl} onChange={(e) => setMediaUrl(e.target.value)} placeholder="/media/" />
+                      </div>
+                    </div>
+                    <div className="field">
+                      <label>目录所有者（可选）</label>
+                      <input value={mediaOwner} onChange={(e) => setMediaOwner(e.target.value)} placeholder="1000:1000" />
+                    </div>
+                    <p className="form-hint">
+                      平台会创建 /srv/data/&lt;应用ID&gt;/media 并挂载；填写 URL 后自动生成 nginx sidecar。
+                    </p>
+                  </>
+                )}
+              </div>
+            </>
           ) : (
             <>
               <div className="field-row-split">
@@ -500,7 +632,9 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
               placeholder={'每行一个 KEY=VALUE\nPOSTGRES_DB=appdb\nPOSTGRES_USER=appuser\nPOSTGRES_PASSWORD=...'}
             />
             <div className="env-hint-row">
-              <span className="form-hint">保存时整体加密，部署时写入容器；日志中只显示变量名。</span>
+              <span className="form-hint">
+                {editing ? '留空则保持现有环境变量不变。' : '保存时整体加密，部署时写入容器；日志中只显示变量名。'}
+              </span>
               {kind === 'service' && (
                 <button type="button" className="link-btn" onClick={fillPassword}>
                   生成随机密码
@@ -521,14 +655,16 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
 
           {formError && <div className="form-error">{formError}</div>}
           <div className="modal-foot">
-            <button className="btn ghost" onClick={onCloseCreate} disabled={creating}>
+            <button className="btn ghost" onClick={closeForm} disabled={creating}>
               取消
             </button>
-            <button className="btn primary" onClick={submit} disabled={creating || !servers.length}>
+            <button className="btn primary" onClick={submit} disabled={creating || (!editing && !servers.length)}>
               {creating ? (
                 <>
-                  <span className="spinner" /> 创建中…
+                  <span className="spinner" /> {editing ? '保存中…' : '创建中…'}
                 </>
+              ) : editing ? (
+                '保存'
               ) : (
                 '创建'
               )}
@@ -562,6 +698,21 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                 />
                 <span>
                   同时删除数据目录 <code>{deleteTarget.service?.dataDir}</code>（不可恢复）
+                </span>
+              </label>
+            )}
+
+            {deleteTarget.kind === 'image' && deleteTarget.volumes?.length > 0 && (
+              <label className={`check-row${removeData ? ' danger' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={removeData}
+                  disabled={!cleanup}
+                  onChange={(e) => setRemoveData(e.target.checked)}
+                />
+                <span>
+                  同时删除媒体目录{' '}
+                  <code>{deleteTarget.volumes.map((v) => v.hostPath).join('、')}</code>（不可恢复）
                 </span>
               </label>
             )}

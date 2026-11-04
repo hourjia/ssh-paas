@@ -39,11 +39,9 @@ function labelLines(app) {
   ]
 }
 
-function networkLines() {
+function networksBlock() {
   return [
-    '    networks:',
-    '      - proxy-net',
-    '      - shared-net',
+    '',
     'networks:',
     '  proxy-net:',
     '    external: true',
@@ -51,6 +49,65 @@ function networkLines() {
     '    external: true',
     '',
   ]
+}
+
+function appNetworks() {
+  return ['    networks:', '      - proxy-net', '      - shared-net']
+}
+
+function appVolumeLines(app) {
+  if (!app.volumes?.length) return []
+  return [
+    '    volumes:',
+    ...app.volumes.map((v) => `      - ${JSON.stringify(`${v.hostPath}:${v.mountPath}`)}`),
+  ]
+}
+
+function mediaServiceLines(app) {
+  const served = (app.volumes || []).filter((v) => v.serveUrl)
+  if (!served.length) return []
+  const lines = [
+    '  media:',
+    '    image: nginx:alpine',
+    `    container_name: ourjia_${app.id}_media`,
+    '    restart: unless-stopped',
+    '    volumes:',
+    ...served.map((v) => `      - ${JSON.stringify(`${v.hostPath}:${v.mountPath}:ro`)}`),
+    `      - ${JSON.stringify(`/srv/apps/${app.id}/media.conf:/etc/nginx/conf.d/default.conf:ro`)}`,
+    '    networks:',
+    '      - proxy-net',
+    '    labels:',
+    '      - "traefik.enable=true"',
+    '      - "traefik.docker.network=proxy-net"',
+    `      - "deploy.app=${app.id}"`,
+  ]
+  for (const volume of served) {
+    const slug = `${app.id}-media-${volume.name}`
+    lines.push(
+      `      - "traefik.http.routers.${slug}.rule=Host(\`${app.domain}\`) && PathPrefix(\`${volume.serveUrl}\`)"`,
+      `      - "traefik.http.routers.${slug}.entrypoints=websecure"`,
+      `      - "traefik.http.routers.${slug}.tls=true"`,
+      `      - "traefik.http.routers.${slug}.tls.certresolver=le"`,
+      `      - "traefik.http.routers.${slug}.priority=200"`,
+      `      - "traefik.http.services.${slug}.loadbalancer.server.port=80"`,
+    )
+  }
+  return lines
+}
+
+function buildMediaConf(app) {
+  const served = (app.volumes || []).filter((v) => v.serveUrl)
+  const locations = served.map((volume) => {
+    const root = volume.mountPath.replace(/\/+$/, '')
+    return [
+      `  location ${volume.serveUrl} {`,
+      `    alias ${root}/;`,
+      '    expires 30d;',
+      '    add_header Cache-Control "public";',
+      '  }',
+    ].join('\n')
+  })
+  return `server {\n  listen 80;\n${locations.join('\n')}\n}\n`
 }
 
 function envLines(env) {
@@ -74,7 +131,10 @@ function buildImageCompose(app, env) {
     '    restart: unless-stopped',
     ...labelLines(app),
     ...envLines(env),
-    ...networkLines(),
+    ...appVolumeLines(app),
+    ...appNetworks(),
+    ...mediaServiceLines(app),
+    ...networksBlock(),
   ].join('\n')
 }
 
@@ -260,8 +320,21 @@ async function deployImage(job, conn, app) {
     appendLog(job, '未配置环境变量', 'note')
   }
   await execScript(conn, `mkdir -p ${dir} && chmod 700 ${dir}`, { timeoutMs: 15000 })
+  for (const volume of app.volumes || []) {
+    const lines = [`mkdir -p ${volume.hostPath}`]
+    if (volume.owner) lines.push(`chown ${volume.owner} ${volume.hostPath}`)
+    await execScript(conn, lines.join('\n'), { timeoutMs: 15000 })
+    appendLog(
+      job,
+      `数据卷 ${volume.name}：${volume.hostPath} → ${volume.mountPath}${volume.serveUrl ? `（${volume.serveUrl} 由 nginx 提供）` : ''}`,
+      'note',
+    )
+  }
   const compose = buildImageCompose(app, env)
   await sftpWrite(conn, `${dir}/docker-compose.yml`, compose, 0o600)
+  if ((app.volumes || []).some((v) => v.serveUrl)) {
+    await sftpWrite(conn, `${dir}/media.conf`, buildMediaConf(app), 0o644)
+  }
   await sftpWrite(
     conn,
     `${dir}/release.json`,
@@ -273,6 +346,8 @@ async function deployImage(job, conn, app) {
         image: app.image,
         domain: app.domain,
         port: app.runtime.port,
+        healthPath: app.runtime.healthPath,
+        volumes: (app.volumes || []).map((v) => ({ name: v.name, mountPath: v.mountPath, serveUrl: v.serveUrl })),
         envKeys: Object.keys(env),
         deployedAt: new Date().toISOString(),
       },
