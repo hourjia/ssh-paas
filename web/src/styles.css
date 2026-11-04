@@ -653,3 +653,13 @@ select{cursor:pointer}
 .res-confirm li{display:flex;align-items:center;gap:4px}
 .preset-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .link-btn.active{font-weight:600;text-decoration:underline;text-underline-offset:3px}
+.env-editor{display:flex;flex-direction:column;gap:8px}
+.env-row{display:grid;grid-template-columns:170px minmax(0,1fr) 130px 28px;gap:8px;align-items:start;padding:10px;border:1px solid var(--stroke-lo);border-radius:12px}
+.env-row input{width:100%}
+.env-values{display:flex;flex-direction:column;gap:6px}
+.env-value{display:flex;gap:6px;align-items:center}
+.env-value input{flex:1}
+.env-row-btn{width:24px;height:24px;border-radius:8px;border:1px solid var(--stroke-lo);background:transparent;color:var(--text-3);font-size:14px;line-height:1;cursor:pointer}
+.env-row-btn:hover{color:var(--st-err);border-color:var(--st-err)}
+.env-note{font-size:12px}
+@media (max-width:760px){.env-row{grid-template-columns:1fr 28px}.env-note{grid-column:1/3}}

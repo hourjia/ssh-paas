@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api'
-import type { AppRecord, AppTemplate, ServerRecord, UpdateAppPayload } from '../types'
+import type { AppRecord, AppTemplate, EnvEntry, ServerRecord, UpdateAppPayload } from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
 import { ContainerIcon, DeployIcon, PlusIcon } from '../icons'
@@ -26,7 +26,6 @@ const EMPTY_FORM = {
   image: '',
   domain: '',
   port: '80',
-  env: '',
   notes: '',
   alias: '',
   dataDir: '',
@@ -66,6 +65,8 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [editing, setEditing] = useState<AppRecord | null>(null)
   const [templates, setTemplates] = useState<AppTemplate[]>([])
   const [templateId, setTemplateId] = useState<string | null>(null)
+  const [envRows, setEnvRows] = useState<EnvEntry[]>([])
+  const [envLoaded, setEnvLoaded] = useState(false)
 
   const [deleteTarget, setDeleteTarget] = useState<AppRecord | null>(null)
   const [cleanup, setCleanup] = useState(true)
@@ -187,10 +188,15 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       alias: template.defaults.alias || '',
       containerPath: template.defaults.containerPath || '',
       healthCmd: template.defaults.healthCmd || '',
-      env: template.env
-        .map((e) => `${e.key}=${(e.value ?? e.template ?? '').replaceAll('{{secret}}', secret)}`)
-        .join('\n'),
     }))
+    setEnvRows(
+      template.env.map((entry) => ({
+        key: entry.key,
+        values: [(entry.value ?? entry.template ?? '').replaceAll('{{secret}}', secret)],
+        note: '',
+      })),
+    )
+    setEnvLoaded(true)
     if (template.kind === 'image') {
       setHealthPath(template.defaults.healthPath || '/')
       const volume = template.defaults.volumes?.[0]
@@ -206,15 +212,32 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
 
   const fillPassword = () => {
     const pwd = randomPassword()
-    setForm((cur) => {
-      const line = `POSTGRES_PASSWORD=${pwd}`
-      const env = /^POSTGRES_PASSWORD=.*$/m.test(cur.env)
-        ? cur.env.replace(/^POSTGRES_PASSWORD=.*$/m, line)
-        : `${cur.env}${cur.env.trim() ? '\n' : ''}${line}`
-      return { ...cur, env }
+    setEnvRows((rows) => {
+      const idx = rows.findIndex((row) => row.key === 'POSTGRES_PASSWORD')
+      if (idx >= 0) return rows.map((row, i) => (i === idx ? { ...row, values: [pwd] } : row))
+      return [...rows, { key: 'POSTGRES_PASSWORD', values: [pwd], note: '数据库密码' }]
     })
     onToast('已生成随机密码，请记得保存')
   }
+
+  const addEnvRow = () => setEnvRows((rows) => [...rows, { key: '', values: [''], note: '' }])
+  const removeEnvRow = (index: number) => setEnvRows((rows) => rows.filter((_, i) => i !== index))
+  const updateEnvRow = (index: number, patch: Partial<EnvEntry>) =>
+    setEnvRows((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  const addEnvValue = (index: number) =>
+    setEnvRows((rows) => rows.map((row, i) => (i === index ? { ...row, values: [...row.values, ''] } : row)))
+  const updateEnvValue = (index: number, valueIndex: number, value: string) =>
+    setEnvRows((rows) =>
+      rows.map((row, i) =>
+        i === index ? { ...row, values: row.values.map((v, j) => (j === valueIndex ? value : v)) } : row,
+      ),
+    )
+  const removeEnvValue = (index: number, valueIndex: number) =>
+    setEnvRows((rows) =>
+      rows.map((row, i) =>
+        i === index ? { ...row, values: row.values.filter((_, j) => j !== valueIndex) } : row,
+      ),
+    )
 
   const resetForm = () => {
     setForm(EMPTY_FORM)
@@ -223,11 +246,13 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setMediaMount('/data/media')
     setMediaUrl('/media/')
     setMediaOwner('')
+    setEnvRows([])
+    setEnvLoaded(false)
   }
 
   const openEdit = (app: AppRecord) => {
     setEditing(app)
-    setKind('image')
+    setKind(app.kind)
     setFormError(null)
     setForm({
       ...EMPTY_FORM,
@@ -235,9 +260,15 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       image: app.image || '',
       domain: app.domain || '',
       port: String(app.runtime.port),
-      env: '',
       notes: app.notes || '',
+      alias: app.service?.alias || '',
+      dataDir: app.service?.dataDir || '',
+      containerPath: app.service?.containerPath || '',
+      dataOwner: app.service?.dataOwner || '',
+      healthCmd: app.service?.healthCmd || '',
     })
+    setEnvRows([])
+    setEnvLoaded(false)
     setHealthPath(app.runtime.healthPath || '/')
     const volume = app.volumes?.[0]
     setMediaEnabled(Boolean(volume))
@@ -247,13 +278,11 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     api
       .getAppEnv(app.id)
       .then(({ env }) => {
-        const text = Object.entries(env)
-          .map(([key, value]) => `${key}=${value}`)
-          .join('\n')
-        setForm((cur) => ({ ...cur, env: text }))
+        setEnvRows(env)
+        setEnvLoaded(true)
       })
       .catch(() => {
-        /* 读取失败时留空，用户可重新填写完整环境变量 */
+        onToast('环境变量读取失败，本次保存将保留原环境变量')
       })
   }
 
@@ -273,7 +302,14 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setCreating(true)
     setFormError(null)
     try {
-      const envText = form.env.replaceAll('{{domain}}', form.domain.trim())
+      const domain = form.domain.trim()
+      const env: EnvEntry[] = envRows
+        .filter((row) => row.key.trim())
+        .map((row) => ({
+          key: row.key.trim(),
+          values: (row.values.length ? row.values : ['']).map((value) => value.replaceAll('{{domain}}', domain)),
+          note: row.note.trim(),
+        }))
       const volumes =
         kind === 'image' && mediaEnabled
           ? [
@@ -290,13 +326,25 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         const payload: UpdateAppPayload = {
           name: form.name.trim(),
           image: form.image.trim(),
-          domain: form.domain.trim(),
-          port: Number(form.port) || 80,
+          port: Number(form.port) || (kind === 'service' ? 5432 : 80),
           notes: form.notes.trim(),
-          healthPath,
-          volumes,
         }
-        if (form.env.trim()) payload.env = envText
+        if (envLoaded || envRows.length > 0) payload.env = env
+        if (kind === 'service') {
+          Object.assign(payload, {
+            alias: form.alias.trim(),
+            dataDir: form.dataDir.trim() || undefined,
+            containerPath: form.containerPath.trim(),
+            dataOwner: form.dataOwner.trim(),
+            healthCmd: form.healthCmd.trim(),
+          })
+        } else {
+          Object.assign(payload, {
+            domain,
+            healthPath,
+            volumes,
+          })
+        }
         const { app } = await api.updateApp(editing.id, payload)
         setApps((prev) => prev.map((a) => (a.id === app.id ? app : a)))
         closeForm()
@@ -309,9 +357,9 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         kind,
         name: form.name.trim(),
         image: form.image.trim(),
-        domain: kind === 'image' ? form.domain.trim() : undefined,
+        domain: kind === 'image' ? domain : undefined,
         port: Number(form.port) || (kind === 'service' ? 5432 : 80),
-        env: envText,
+        env,
         notes: form.notes.trim(),
         healthPath: kind === 'image' ? healthPath : undefined,
         volumes,
@@ -329,7 +377,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     } finally {
       setCreating(false)
     }
-  }, [creating, editing, form, kind, healthPath, mediaEnabled, mediaMount, mediaOwner, mediaUrl, onCloseCreate, onToast, serverId])
+  }, [creating, editing, envLoaded, envRows, form, kind, healthPath, mediaEnabled, mediaMount, mediaOwner, mediaUrl, onCloseCreate, onToast, serverId])
 
   return (
     <div className="apps-page">
@@ -448,11 +496,9 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                       </>
                     )}
                   </button>
-                  {!isService && (
-                    <button className="btn ghost sm" onClick={() => openEdit(app)} disabled={deploying}>
-                      编辑
-                    </button>
-                  )}
+                  <button className="btn ghost sm" onClick={() => openEdit(app)} disabled={deploying}>
+                    编辑
+                  </button>
                   <button className="btn ghost sm" onClick={() => askRemove(app)} disabled={deploying}>
                     删除
                   </button>
@@ -659,16 +705,57 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
 
           <div className="field">
             <label>环境变量（可选）</label>
-            <textarea
-              rows={4}
-              value={form.env}
-              onChange={(e) => setField('env', e.target.value)}
-              placeholder={'每行一个 KEY=VALUE\nPOSTGRES_DB=appdb\nPOSTGRES_USER=appuser\nPOSTGRES_PASSWORD=...'}
-            />
+            <div className="env-editor">
+              {envRows.map((row, index) => (
+                <div className="env-row" key={index}>
+                  <input
+                    className="env-key mono"
+                    value={row.key}
+                    placeholder="变量名"
+                    onChange={(e) => updateEnvRow(index, { key: e.target.value })}
+                  />
+                  <div className="env-values">
+                    {row.values.map((value, valueIndex) => (
+                      <div className="env-value" key={valueIndex}>
+                        <input
+                          className="mono"
+                          value={value}
+                          placeholder="变量值"
+                          onChange={(e) => updateEnvValue(index, valueIndex, e.target.value)}
+                        />
+                        {row.values.length > 1 && (
+                          <button
+                            type="button"
+                            className="env-row-btn"
+                            title="删除这个值"
+                            onClick={() => removeEnvValue(index, valueIndex)}
+                          >
+                            −
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    <button type="button" className="link-btn" onClick={() => addEnvValue(index)}>
+                      + 多值
+                    </button>
+                  </div>
+                  <input
+                    className="env-note"
+                    value={row.note}
+                    placeholder="备注"
+                    onChange={(e) => updateEnvRow(index, { note: e.target.value })}
+                  />
+                  <button type="button" className="env-row-btn" title="删除变量" onClick={() => removeEnvRow(index)}>
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="link-btn" onClick={addEnvRow}>
+                + 添加变量
+              </button>
+            </div>
             <div className="env-hint-row">
-              <span className="form-hint">
-                {editing ? '留空则保持现有环境变量不变。' : '保存时整体加密，部署时写入容器；日志中只显示变量名。'}
-              </span>
+              <span className="form-hint">多值会用逗号连接成一个变量（如 ALLOWED_HOSTS=a,b）；保存时整体加密。</span>
               {kind === 'service' && (
                 <button type="button" className="link-btn" onClick={fillPassword}>
                   生成随机密码

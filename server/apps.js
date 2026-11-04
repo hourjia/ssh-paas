@@ -51,39 +51,75 @@ function bad(message) {
   return err
 }
 
-function parseEnvInput(raw) {
-  if (!raw) return []
-  const lines = Array.isArray(raw) ? raw : String(raw).split(/\r?\n/)
-  const out = []
-  const seen = new Set()
-  for (const line of lines) {
-    const text = String(line).trim()
-    if (!text || text.startsWith('#')) continue
+function normalizeEnvEntry(item) {
+  let key
+  let values
+  let note = ''
+  if (typeof item === 'string') {
+    const text = item.trim()
+    if (!text || text.startsWith('#')) return null
     const idx = text.indexOf('=')
     if (idx <= 0) throw bad(`环境变量格式错误：${text}（应为 KEY=VALUE）`)
-    const key = text.slice(0, idx).trim()
-    const value = text.slice(idx + 1)
-    if (!ENV_KEY_RE.test(key)) throw bad(`环境变量名不合法：${key}`)
-    if (seen.has(key)) throw bad(`环境变量重复：${key}`)
-    if (value.length > 4096) throw bad(`环境变量 ${key} 的值过长`)
-    seen.add(key)
-    out.push({ key, value })
+    key = text.slice(0, idx).trim()
+    values = [text.slice(idx + 1)]
+  } else if (item && typeof item === 'object') {
+    key = String(item.key || '').trim()
+    if (Array.isArray(item.values)) values = item.values.map(String)
+    else if (item.value !== undefined) values = [String(item.value)]
+    else values = ['']
+    note = String(item.note || '').trim().slice(0, 200)
+  } else {
+    throw bad('环境变量格式不正确')
+  }
+
+  if (!key) throw bad('环境变量名不能为空')
+  if (!ENV_KEY_RE.test(key)) throw bad(`环境变量名不合法：${key}`)
+  if (!values.length) values = ['']
+  if (values.length > 20) throw bad(`环境变量 ${key} 的值最多 20 项`)
+  for (const value of values) {
+    if (String(value).length > 4096) throw bad(`环境变量 ${key} 的值过长`)
+  }
+  return { key, values, note }
+}
+
+function parseEnvInput(raw) {
+  if (!raw) return []
+  const items = typeof raw === 'string' ? raw.split(/\r?\n/) : raw
+  if (!Array.isArray(items)) throw bad('环境变量格式不正确')
+  const out = []
+  const seen = new Set()
+  for (const item of items) {
+    const entry = normalizeEnvEntry(item)
+    if (!entry) continue
+    if (seen.has(entry.key)) throw bad(`环境变量重复：${entry.key}`)
+    seen.add(entry.key)
+    out.push(entry)
   }
   if (out.length > ENV_MAX) throw bad(`环境变量最多 ${ENV_MAX} 个`)
   return out
 }
 
 // 环境变量可能含密钥，落盘前整体加密
-export function readEnv(app) {
-  if (!app?.envEnc) return {}
+export function readEnvEntries(app) {
+  if (!app?.envEnc) return []
   const raw = decrypt(app.envEnc)
   if (!raw) throw bad('环境变量解密失败，请检查 server/data/.secret 是否被替换')
   try {
     const list = JSON.parse(raw)
-    return Object.fromEntries(list.map((e) => [e.key, e.value]))
+    return list.map((entry) => ({
+      key: entry.key,
+      values: Array.isArray(entry.values) ? entry.values.map(String) : [String(entry.value ?? '')],
+      note: entry.note || '',
+    }))
   } catch {
     throw bad('环境变量数据损坏')
   }
+}
+
+// 多值变量在注入容器时用逗号连接
+export function readEnv(app) {
+  const entries = readEnvEntries(app)
+  return Object.fromEntries(entries.map((entry) => [entry.key, entry.values.join(',')]))
 }
 
 function normalizeDataDir(raw) {
@@ -318,8 +354,6 @@ export function buildCleanupScript(app, removeData = false) {
 }
 
 export function updateApp(app, input = {}) {
-  if (app.kind !== 'image') throw bad('共享服务暂不支持编辑，请删除后重建')
-
   const list = load()
   const name = input.name !== undefined ? String(input.name).trim() : app.name
   if (!name) throw bad('应用名称不能为空')
@@ -328,21 +362,65 @@ export function updateApp(app, input = {}) {
   const image = input.image !== undefined ? String(input.image).trim() : app.image
   if (!IMAGE_RE.test(image)) throw bad('镜像地址格式不合法，例如 registry.example.com/team/app:v1')
 
+  const port =
+    input.port !== undefined && input.port !== null && input.port !== ''
+      ? Number(input.port)
+      : app.runtime?.port || (app.kind === 'service' ? 5432 : 80)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw bad('端口需为 1-65535')
+
+  const notes = input.notes !== undefined ? String(input.notes).trim() : app.notes || ''
+  if (notes.length > NOTES_MAX) throw bad(`备注不能超过 ${NOTES_MAX} 个字符`)
+
+  if (input.env !== undefined) {
+    const env = parseEnvInput(input.env)
+    app.envEnc = env.length ? encrypt(JSON.stringify(env)) : null
+  }
+
+  if (app.kind === 'service') {
+    const current = app.service || {}
+    const alias = input.alias !== undefined ? String(input.alias).trim().toLowerCase() : current.alias || ''
+    if (alias && !ALIAS_RE.test(alias)) throw bad('网络别名只能包含小写字母、数字和短横线')
+    if (alias) {
+      const dup = list.find((a) => a.id !== app.id && a.serverId === app.serverId && a.service?.alias === alias)
+      if (dup) throw bad(`网络别名 ${alias} 已被「${dup.name}」占用`)
+    }
+
+    const containerPath =
+      input.containerPath !== undefined ? normalizeContainerPath(input.containerPath) : current.containerPath
+    const dataDir =
+      input.dataDir !== undefined
+        ? normalizeDataDir(input.dataDir) || current.dataDir
+        : current.dataDir
+    const dataOwner = input.dataOwner !== undefined ? String(input.dataOwner).trim() : current.dataOwner || ''
+    if (dataOwner && !OWNER_RE.test(dataOwner)) throw bad('目录所有者格式为 uid:gid，例如 999:999')
+    const healthCmd = input.healthCmd !== undefined ? String(input.healthCmd).trim() : current.healthCmd || ''
+    if (healthCmd.length > 200 || /[\r\n]/.test(healthCmd)) throw bad('健康检查命令过长或包含换行')
+
+    Object.assign(app, {
+      name,
+      image,
+      notes,
+      runtime: { ...app.runtime, port },
+      service: {
+        alias: alias || null,
+        dataDir,
+        containerPath,
+        dataOwner: dataOwner || null,
+        healthCmd: healthCmd || null,
+      },
+      updatedAt: new Date().toISOString(),
+    })
+    saveApps()
+    return app
+  }
+
   const domain = input.domain !== undefined ? String(input.domain).trim().toLowerCase() : app.domain
   if (!DOMAIN_RE.test(domain)) throw bad('域名格式不合法，例如 demo.example.com')
   if (list.some((a) => a.id !== app.id && a.serverId === app.serverId && a.domain === domain)) {
     throw bad('该服务器上已有应用使用这个域名')
   }
 
-  const port =
-    input.port !== undefined && input.port !== null && input.port !== ''
-      ? Number(input.port)
-      : app.runtime?.port || 80
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw bad('端口需为 1-65535')
-
   const healthPath = input.healthPath !== undefined ? normalizeHealthPath(input.healthPath) : app.runtime?.healthPath || '/'
-  const notes = input.notes !== undefined ? String(input.notes).trim() : app.notes || ''
-  if (notes.length > NOTES_MAX) throw bad(`备注不能超过 ${NOTES_MAX} 个字符`)
 
   let volumes = app.volumes || []
   if (input.volumes !== undefined) {
@@ -353,11 +431,6 @@ export function updateApp(app, input = {}) {
       hostPath: existing.get(v.name)?.hostPath || `/srv/data/${app.id}/${v.name}`,
       readOnly: false,
     }))
-  }
-
-  if (input.env !== undefined) {
-    const env = parseEnvInput(input.env)
-    app.envEnc = env.length ? encrypt(JSON.stringify(env)) : null
   }
 
   Object.assign(app, {

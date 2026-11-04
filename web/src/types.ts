@@ -207,6 +207,12 @@ export interface AppRecord {
   updatedAt: string
 }
 
+export interface EnvEntry {
+  key: string
+  values: string[]
+  note: string
+}
+
 export interface CreateAppPayload {
   serverId: string
   kind: 'image' | 'service'
@@ -214,7 +220,7 @@ export interface CreateAppPayload {
   image: string
   domain?: string
   port: number
-  env?: string
+  env?: EnvEntry[]
   notes: string
   healthPath?: string
   volumes?: AppVolumeInput[]
@@ -237,10 +243,15 @@ export interface UpdateAppPayload {
   image?: string
   domain?: string
   port?: number
-  env?: string
+  env?: EnvEntry[]
   notes?: string
   healthPath?: string
   volumes?: AppVolumeInput[]
+  alias?: string
+  dataDir?: string
+  containerPath?: string
+  dataOwner?: string
+  healthCmd?: string
 }
 
 export interface Settings {

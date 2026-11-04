@@ -4,6 +4,7 @@ import type {
   AppTemplate,
   CheckReport,
   CreateAppPayload,
+  EnvEntry,
   JobSnapshot,
   ServerConfig,
   ServerRecord,
@@ -109,7 +110,7 @@ export function updateApp(id: string, payload: UpdateAppPayload) {
 }
 
 export function getAppEnv(id: string) {
-  return request<{ env: Record<string, string> }>(`/api/apps/${id}/env`)
+  return request<{ env: EnvEntry[] }>(`/api/apps/${id}/env`)
 }
 
 export function getServerResources(id: string) {

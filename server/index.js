@@ -8,7 +8,7 @@ import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
-import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript, readEnv } from './apps.js'
+import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript, readEnvEntries } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
 import { scanServerResources, buildResourceCleanupScript } from './resources.js'
 import { listTemplates } from './templates.js'
@@ -318,7 +318,7 @@ app.get('/api/apps/:id/env', wrap((req, res) => {
   }
   const rec = findApp(req.params.id)
   if (!rec) throw badRequest('应用不存在')
-  res.json({ env: readEnv(rec) })
+  res.json({ env: readEnvEntries(rec) })
 }))
 
 app.put('/api/apps/:id', wrap((req, res) => {
