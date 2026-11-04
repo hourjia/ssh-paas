@@ -108,6 +108,10 @@ export function updateApp(id: string, payload: UpdateAppPayload) {
   })
 }
 
+export function getAppEnv(id: string) {
+  return request<{ env: Record<string, string> }>(`/api/apps/${id}/env`)
+}
+
 export function getServerResources(id: string) {
   return request<ServerResources>(`/api/servers/${id}/resources`)
 }

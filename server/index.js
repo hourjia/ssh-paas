@@ -8,7 +8,7 @@ import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
-import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript } from './apps.js'
+import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript, readEnv } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
 import { scanServerResources, buildResourceCleanupScript } from './resources.js'
 import { listTemplates } from './templates.js'
@@ -309,6 +309,16 @@ app.post('/api/apps', wrap((req, res) => {
   if (!server) throw badRequest('服务器不存在')
   const rec = createApp({ ...req.body, serverId: server.id })
   res.json({ app: publicApp(rec) })
+}))
+
+app.get('/api/apps/:id/env', wrap((req, res) => {
+  const ip = req.socket.remoteAddress
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+    throw badRequest('仅允许本机读取环境变量')
+  }
+  const rec = findApp(req.params.id)
+  if (!rec) throw badRequest('应用不存在')
+  res.json({ env: readEnv(rec) })
 }))
 
 app.put('/api/apps/:id', wrap((req, res) => {

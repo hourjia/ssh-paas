@@ -40,6 +40,11 @@ function randomPassword() {
   return Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24)
 }
 
+function randomSecret() {
+  const bytes = crypto.getRandomValues(new Uint8Array(48))
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 64)
+}
+
 export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onGoServers, onToast }: AppsPageProps) {
   const [apps, setApps] = useState<AppRecord[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -171,6 +176,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const applyTemplate = (template: AppTemplate) => {
     setTemplateId(template.id)
     setKind(template.kind)
+    const secret = randomSecret()
     setForm((cur) => ({
       ...EMPTY_FORM,
       name: cur.name,
@@ -181,7 +187,9 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       alias: template.defaults.alias || '',
       containerPath: template.defaults.containerPath || '',
       healthCmd: template.defaults.healthCmd || '',
-      env: template.env.map((e) => `${e.key}=${e.value ?? e.template ?? ''}`).join('\n'),
+      env: template.env
+        .map((e) => `${e.key}=${(e.value ?? e.template ?? '').replaceAll('{{secret}}', secret)}`)
+        .join('\n'),
     }))
     if (template.kind === 'image') {
       setHealthPath(template.defaults.healthPath || '/')
@@ -236,6 +244,17 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
     setMediaMount(volume?.mountPath || '/data/media')
     setMediaUrl(volume?.serveUrl || '/media/')
     setMediaOwner(volume?.owner || '')
+    api
+      .getAppEnv(app.id)
+      .then(({ env }) => {
+        const text = Object.entries(env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join('\n')
+        setForm((cur) => ({ ...cur, env: text }))
+      })
+      .catch(() => {
+        /* 读取失败时留空，用户可重新填写完整环境变量 */
+      })
   }
 
   const closeForm = () => {

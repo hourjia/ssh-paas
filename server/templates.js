@@ -14,6 +14,7 @@ export const TEMPLATES = [
     },
     env: [
       { key: 'DJANGO_SETTINGS_MODULE', value: 'config.settings.production' },
+      { key: 'DJANGO_SECRET_KEY', template: '{{secret}}' },
       { key: 'DJANGO_ALLOWED_HOSTS', template: '{{domain}}' },
       { key: 'DJANGO_CSRF_TRUSTED_ORIGINS', template: 'https://{{domain}}' },
       { key: 'DJANGO_MEDIA_ROOT', value: '/data/media' },
