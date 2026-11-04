@@ -42,19 +42,15 @@ export const TEMPLATES = [
     id: 'postgres',
     label: 'PostgreSQL 16',
     kind: 'service',
-    description: 'PostgreSQL 16，数据落在 /srv/data，仅 shared-net 内可达',
+    description: 'PostgreSQL 16，数据落在 /srv/data，仅 shared-net 内可达；部署只初始化内置管理员，业务用户由建库脚本创建',
     defaults: {
       image: 'postgres:16-alpine',
       port: 5432,
       alias: 'postgres',
       containerPath: '/var/lib/postgresql/data',
-      healthCmd: 'pg_isready -U appuser -d appdb',
+      healthCmd: 'pg_isready',
     },
-    env: [
-      { key: 'POSTGRES_DB', value: 'appdb' },
-      { key: 'POSTGRES_USER', value: 'appuser' },
-      { key: 'POSTGRES_PASSWORD', value: 'change-me' },
-    ],
+    env: [{ key: 'POSTGRES_PASSWORD', template: '{{secret}}' }],
   },
   {
     id: 'redis',

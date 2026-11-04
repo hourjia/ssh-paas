@@ -9,6 +9,9 @@ import type {
   ServerConfig,
   ServerRecord,
   ServerResources,
+  ScriptDetail,
+  ScriptPayload,
+  ScriptRecord,
   UpdateAppPayload,
 } from './types'
 
@@ -102,6 +105,20 @@ export function deployApp(id: string) {
   })
 }
 
+export function stopApp(id: string) {
+  return request<{ app: AppRecord; detail?: string }>(`/api/apps/${id}/stop`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
+export function startApp(id: string) {
+  return request<{ app: AppRecord; detail?: string }>(`/api/apps/${id}/start`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
 export function updateApp(id: string, payload: UpdateAppPayload) {
   return request<{ app: AppRecord }>(`/api/apps/${id}`, {
     method: 'PUT',
@@ -122,6 +139,39 @@ export function cleanupServerResources(id: string, payload: { containers: string
     `/api/servers/${id}/resources/cleanup`,
     { method: 'POST', body: JSON.stringify(payload) },
   )
+}
+
+export function listScripts() {
+  return request<{ scripts: ScriptRecord[] }>('/api/scripts')
+}
+
+export function getScript(id: string) {
+  return request<{ script: ScriptDetail }>(`/api/scripts/${id}`)
+}
+
+export function createScript(payload: ScriptPayload) {
+  return request<{ script: ScriptRecord }>('/api/scripts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateScript(id: string, payload: ScriptPayload) {
+  return request<{ script: ScriptRecord }>(`/api/scripts/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteScript(id: string) {
+  return request<{ ok: boolean }>(`/api/scripts/${id}`, { method: 'DELETE' })
+}
+
+export function runScript(id: string, serverId: string, values: Record<string, string> = {}) {
+  return request<{ job: JobSnapshot; script: ScriptRecord }>(`/api/scripts/${id}/run`, {
+    method: 'POST',
+    body: JSON.stringify({ serverId, values }),
+  })
 }
 
 const TERMINAL = new Set(['done', 'failed', 'interrupted'])

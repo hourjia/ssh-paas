@@ -199,7 +199,7 @@ export interface AppRecord {
   volumes: AppVolume[]
   service: AppServiceConfig | null
   runtime: { baseImage?: string; port: number; healthPath: string | null }
-  status: 'idle' | 'deploying' | 'running' | 'failed'
+  status: 'idle' | 'deploying' | 'running' | 'stopped' | 'failed'
   warning: string | null
   lastError: string | null
   delivery: AppDelivery
@@ -252,6 +252,63 @@ export interface UpdateAppPayload {
   containerPath?: string
   dataOwner?: string
   healthCmd?: string
+}
+
+export interface ScriptEnvEntry {
+  key: string
+  value: string
+}
+
+export interface ScriptParam {
+  key: string
+  label: string
+  defaultValue: string
+  required: boolean
+  // text：普通文本输入；bool：运行弹窗里的开关
+  type?: 'text' | 'bool'
+}
+
+export interface ScriptLastRun {
+  at: string | null
+  status: 'ok' | 'failed' | null
+  error: string | null
+  jobId: string | null
+  // 最近一次实际执行所用的服务器，可能不同于脚本的默认服务器
+  serverId?: string | null
+}
+
+export interface ScriptRecord {
+  id: string
+  serverId: string
+  name: string
+  filename: string
+  notes: string
+  envKeys: string[]
+  params: ScriptParam[]
+  runAs: string | null
+  useSudo: boolean
+  timeoutSec: number
+  lastRun: ScriptLastRun
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ScriptDetail extends ScriptRecord {
+  content: string
+  env: ScriptEnvEntry[]
+}
+
+export interface ScriptPayload {
+  serverId: string
+  name: string
+  filename: string
+  content: string
+  env: ScriptEnvEntry[]
+  params: ScriptParam[]
+  runAs?: string
+  useSudo: boolean
+  notes?: string
+  timeoutSec?: number
 }
 
 export interface Settings {

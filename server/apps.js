@@ -353,6 +353,42 @@ export function buildCleanupScript(app, removeData = false) {
   return lines.join('\n')
 }
 
+// 手动停止：保留容器与数据目录，之后可手动启动
+export function buildStopScript(app) {
+  const { dir } = appPaths(app)
+  return [
+    'set -e',
+    `DIR=${dir}`,
+    'if [ -f "$DIR/docker-compose.yml" ]; then',
+    '  cd "$DIR"',
+    '  docker compose stop',
+    'fi',
+    `docker stop ourjia_${app.id} >/dev/null 2>&1 || true`,
+    `docker stop ourjia_${app.id}_media >/dev/null 2>&1 || true`,
+    'echo "服务已停止，数据目录保持不变"',
+  ].join('\n')
+}
+
+// 手动启动：只启动已存在的容器，不拉镜像、不改 compose；容器被删掉时提示重新部署
+export function buildStartScript(app) {
+  const { dir } = appPaths(app)
+  return [
+    'set -e',
+    `DIR=${dir}`,
+    'if [ ! -f "$DIR/docker-compose.yml" ]; then',
+    '  echo "还没有部署配置，请先重新部署" >&2',
+    '  exit 1',
+    'fi',
+    'cd "$DIR"',
+    'if [ -z "$(docker compose ps -q app)" ]; then',
+    '  echo "容器不存在，请重新部署" >&2',
+    '  exit 1',
+    'fi',
+    'docker compose start',
+    'docker compose ps',
+  ].join('\n')
+}
+
 export function updateApp(app, input = {}) {
   const list = load()
   const name = input.name !== undefined ? String(input.name).trim() : app.name

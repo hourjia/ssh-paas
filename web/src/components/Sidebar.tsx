@@ -1,11 +1,11 @@
-import { useLayoutEffect, useRef, useState } from 'react'
-import { BrandMark, GridIcon, ServerIcon, SettingsIcon } from '../icons'
+import { BrandMark, GridIcon, ScriptIcon, ServerIcon, SettingsIcon } from '../icons'
 
-export type PageKey = 'apps' | 'servers'
+export type PageKey = 'apps' | 'servers' | 'scripts'
 
 const NAV_ITEMS: { key: PageKey; label: string; icon: typeof GridIcon }[] = [
-  { key: 'apps', label: '应用', icon: GridIcon },
   { key: 'servers', label: '服务器', icon: ServerIcon },
+  { key: 'apps', label: '应用', icon: GridIcon },
+  { key: 'scripts', label: '脚本', icon: ScriptIcon },
 ]
 
 interface SidebarProps {
@@ -15,38 +15,19 @@ interface SidebarProps {
 }
 
 export function Sidebar({ page, onPage, onSettings }: SidebarProps) {
-  const navRef = useRef<HTMLElement>(null)
-  const [pill, setPill] = useState({ top: 0, height: 52 })
-
-  const measure = () => {
-    const active = navRef.current?.querySelector<HTMLElement>('.nav-item.active')
-    if (active) setPill({ top: active.offsetTop, height: active.offsetHeight })
-  }
-
-  useLayoutEffect(() => {
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [page])
-
   return (
-    <aside className="sidebar glass sheen">
+    <aside className="sidebar">
       <div className="brand">
         <BrandMark className="brand-mark" />
         <div className="brand-text">
-          <strong>SSH-PAAS</strong>
-          <span>SSH 运维</span>
+          <strong>OURJIA PAAS</strong>
+          <span>SSH 运维平台</span>
         </div>
       </div>
 
-      <nav className="nav" ref={navRef} aria-label="主导航">
-        <div className="nav-indicator" style={{ transform: `translateY(${pill.top}px)`, height: pill.height }} />
+      <nav className="nav" aria-label="主导航">
         {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            className={`nav-item${page === key ? ' active' : ''}`}
-            onClick={() => onPage(key)}
-          >
+          <button key={key} className={`nav-item${page === key ? ' active' : ''}`} onClick={() => onPage(key)}>
             <Icon />
             <span>{label}</span>
           </button>
@@ -54,7 +35,7 @@ export function Sidebar({ page, onPage, onSettings }: SidebarProps) {
       </nav>
 
       <div className="sidebar-foot">
-        <div className="node-chip glass-lite">
+        <div className="node-chip">
           <i />
           本地节点 · 已连接
         </div>

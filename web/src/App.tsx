@@ -3,9 +3,9 @@ import * as api from './api'
 import type { AddServerPayload, ServerRecord, Settings } from './types'
 import { DEFAULT_SETTINGS } from './types'
 import { Sidebar, type PageKey } from './components/Sidebar'
-import { ActionDock } from './components/ActionDock'
 import { ServersPage } from './pages/ServersPage'
 import { AppsPage } from './pages/AppsPage'
+import { ScriptsPage } from './pages/ScriptsPage'
 import { ServerDetailPage } from './pages/ServerDetailPage'
 import { AddServerModal } from './components/AddServerModal'
 import { SettingsModal } from './components/SettingsModal'
@@ -45,10 +45,12 @@ export default function App() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const [servers, setServers] = useState<ServerRecord[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [addOpen, setAddOpen] = useState(false)
   const [appCreateOpen, setAppCreateOpen] = useState(false)
+  const [scriptCreateOpen, setScriptCreateOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [toasts, setToasts] = useState<ToastItem[]>([])
 
@@ -106,31 +108,30 @@ export default function App() {
     [toast],
   )
 
-  const testAll = useCallback(
-    async (silent: boolean) => {
+  const refreshAll = useCallback(
+    async (silent = false) => {
       const ids = serversRef.current.map((s) => s.id)
       if (!ids.length) {
         if (!silent) toast('没有需要刷新的服务器')
         return
       }
-      await Promise.all(ids.map((id) => testOne(id)))
-      if (!silent) toast('状态已刷新')
+      if (!silent) setRefreshing(true)
+      try {
+        await Promise.all(ids.map((id) => testOne(id)))
+        if (!silent) toast('状态已刷新')
+      } finally {
+        if (!silent) setRefreshing(false)
+      }
     },
     [testOne, toast],
   )
-
-  useEffect(() => {
-    if (settings.autoRefresh === 'off' || page !== 'servers') return
-    const ms = AUTO_REFRESH_MS[settings.autoRefresh]
-    const timer = setInterval(() => testAll(true), ms)
-    return () => clearInterval(timer)
-  }, [settings.autoRefresh, page, testAll])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setAddOpen(false)
         setAppCreateOpen(false)
+        setScriptCreateOpen(false)
         setSettingsOpen(false)
       }
     }
@@ -177,9 +178,9 @@ export default function App() {
     if (detailId) return
     if (settings.autoRefresh === 'off' || page !== 'servers') return
     const ms = AUTO_REFRESH_MS[settings.autoRefresh]
-    const timer = setInterval(() => testAll(true), ms)
+    const timer = setInterval(() => refreshAll(true), ms)
     return () => clearInterval(timer)
-  }, [settings.autoRefresh, page, testAll, detailId])
+  }, [settings.autoRefresh, page, refreshAll, detailId])
 
   return (
     <>
@@ -203,30 +204,33 @@ export default function App() {
             />
           ) : (
             <>
-              <ActionDock
-                showRefresh={page === 'servers'}
-                title={page === 'apps' ? '应用' : '服务器'}
-                addLabel={page === 'apps' ? '新建' : '添加'}
-                onAdd={() => (page === 'servers' ? setAddOpen(true) : setAppCreateOpen(true))}
-                onRefresh={() => testAll(false)}
-              />
               {page === 'servers' ? (
-                loaded ? (
-                  <ServersPage
-                    servers={servers}
-                    testingIds={testingIds}
-                    onTest={(id) => testOne(id)}
-                    onDelete={handleDelete}
-                    onManage={(id) => setDetailId(id)}
-                    onAdd={() => setAddOpen(true)}
-                  />
-                ) : null
-              ) : (
+                <ServersPage
+                  servers={servers}
+                  loading={!loaded}
+                  refreshing={refreshing}
+                  testingIds={testingIds}
+                  onRefresh={() => refreshAll(false)}
+                  onTest={(id) => testOne(id)}
+                  onDelete={handleDelete}
+                  onManage={(id) => setDetailId(id)}
+                  onAdd={() => setAddOpen(true)}
+                />
+              ) : page === 'apps' ? (
                 <AppsPage
                   servers={servers}
                   createOpen={appCreateOpen}
                   onOpenCreate={() => setAppCreateOpen(true)}
                   onCloseCreate={() => setAppCreateOpen(false)}
+                  onGoServers={() => setPage('servers')}
+                  onToast={toast}
+                />
+              ) : (
+                <ScriptsPage
+                  servers={servers}
+                  createOpen={scriptCreateOpen}
+                  onOpenCreate={() => setScriptCreateOpen(true)}
+                  onCloseCreate={() => setScriptCreateOpen(false)}
                   onGoServers={() => setPage('servers')}
                   onToast={toast}
                 />

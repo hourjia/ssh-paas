@@ -11,11 +11,13 @@ export class StepError extends Error {
 }
 
 // 执行一段步骤脚本，实时转发输出；脚本末尾自带 OJ_EXIT 标记以回传退出码
-export async function runStep(job, conn, stepId, script, timeoutMs, title) {
+// options.command 用于替换默认的 `bash -s`（例如以 sudo 指定用户执行）
+export async function runStep(job, conn, stepId, script, timeoutMs, title, options = {}) {
   updateStep(job, stepId, { status: 'running', startedAt: new Date().toISOString() })
   job.currentStep = stepId
   if (title) echoScript(job, title, script)
   const result = await execScript(conn, wrapWithMarker(script), {
+    ...options,
     timeoutMs,
     onStdout: (text) => forward(job, text, 'out'),
     onStderr: (text) => forward(job, text, 'err'),

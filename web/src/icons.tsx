@@ -44,6 +44,19 @@ export function DeployIcon({ className }: IconProps) {
   )
 }
 
+export function ScriptIcon({ className }: IconProps) {
+  return (
+    <Icon className={className}>
+      <rect x="2" y="3.4" width="20" height="2.2" rx="1.1" />
+      <rect x="2" y="18.4" width="20" height="2.2" rx="1.1" />
+      <rect x="2" y="3.4" width="2.2" height="17.2" rx="1.1" />
+      <rect x="19.8" y="3.4" width="2.2" height="17.2" rx="1.1" />
+      <path d="M6.4 7.4 8.2 5.6 12.6 10 8.2 14.4 6.4 12.6 9 10Z" />
+      <rect x="13.4" y="13.2" width="5.8" height="2.2" rx="1.1" />
+    </Icon>
+  )
+}
+
 export function ServerIcon({ className }: IconProps) {
   return (
     <Icon className={className}>

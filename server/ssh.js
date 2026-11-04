@@ -81,9 +81,10 @@ export function runCommand(conn, cmd, timeoutMs = 15000) {
 }
 
 // 通过 stdin 把脚本交给远端 bash，避免命令行转义问题，并实时回传输出
-export function execScript(conn, script, { timeoutMs = 60000, onStdout, onStderr } = {}) {
+// command 可替换成 sudo/su 等包装命令，脚本仍然走 stdin（不会出现在 ps 里，也不落盘）
+export function execScript(conn, script, { timeoutMs = 60000, onStdout, onStderr, command = 'bash -s' } = {}) {
   return new Promise((resolve, reject) => {
-    conn.exec('bash -s', (err, stream) => {
+    conn.exec(command, (err, stream) => {
       if (err) return reject(new Error(friendlySshError(err)))
       let stdout = ''
       let stderr = ''

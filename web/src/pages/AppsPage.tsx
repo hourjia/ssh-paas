@@ -3,6 +3,7 @@ import * as api from '../api'
 import type { AppRecord, AppTemplate, EnvEntry, ServerRecord, UpdateAppPayload } from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
+import { PageHeader } from '../components/PageHeader'
 import { ContainerIcon, DeployIcon, PlusIcon } from '../icons'
 
 interface AppsPageProps {
@@ -18,6 +19,7 @@ const STATUS: Record<AppRecord['status'], { cls: string; label: string }> = {
   idle: { cls: 'st-stop', label: '未部署' },
   deploying: { cls: 'st-stop', label: '部署中' },
   running: { cls: 'st-run', label: '运行中' },
+  stopped: { cls: 'st-stop', label: '已停止' },
   failed: { cls: 'st-err', label: '部署失败' },
 }
 
@@ -72,6 +74,10 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [cleanup, setCleanup] = useState(true)
   const [removeData, setRemoveData] = useState(false)
   const [deleting, setDeleting] = useState(false)
+
+  const [stopTarget, setStopTarget] = useState<AppRecord | null>(null)
+  const [stopping, setStopping] = useState(false)
+  const [startingId, setStartingId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -169,6 +175,38 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       setDeleting(false)
     }
   }, [cleanup, deleteTarget, deleting, onToast, removeData])
+
+  const confirmStop = useCallback(async () => {
+    if (!stopTarget || stopping) return
+    setStopping(true)
+    try {
+      const { app: updated } = await api.stopApp(stopTarget.id)
+      setApps((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))
+      setStopTarget(null)
+      onToast(`服务「${updated.name}」已停止`)
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : '停止失败')
+    } finally {
+      setStopping(false)
+    }
+  }, [onToast, stopTarget, stopping])
+
+  const startService = useCallback(
+    async (app: AppRecord) => {
+      if (busyId || startingId) return
+      setStartingId(app.id)
+      try {
+        const { app: updated } = await api.startApp(app.id)
+        setApps((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))
+        onToast(`服务「${updated.name}」已启动`)
+      } catch (e) {
+        onToast(e instanceof Error ? e.message : '启动失败')
+      } finally {
+        setStartingId(null)
+      }
+    },
+    [busyId, onToast, startingId],
+  )
 
   const setField = (key: keyof typeof EMPTY_FORM, value: string) => {
     setForm((cur) => ({ ...cur, [key]: value }))
@@ -380,17 +418,16 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   }, [creating, editing, envLoaded, envRows, form, kind, healthPath, mediaEnabled, mediaMount, mediaOwner, mediaUrl, onCloseCreate, onToast, serverId])
 
   return (
-    <div className="apps-page">
-      <div className="apps-head">
-        <div>
-          <p className="eyebrow">Apps</p>
-          <h2 className="apps-title">应用</h2>
-          <p className="apps-sub">Web 应用经 Traefik 暴露域名；共享服务只挂 shared-net，不暴露公网。</p>
-        </div>
+    <div className="page">
+      <PageHeader
+        title="应用"
+        subtitle="Web 应用经 Traefik 暴露域名；共享服务只挂 shared-net，不暴露公网。"
+      >
         <button className="btn primary" onClick={onOpenCreate} disabled={!servers.length}>
-          <PlusIcon /> 新建
+          <PlusIcon />
+          新建应用
         </button>
-      </div>
+      </PageHeader>
 
       {!loaded && (
         <div className="glass-lite panel center-panel">
@@ -406,14 +443,10 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
           <h3>还没有应用</h3>
           <p>
             {servers.length
-              ? '新建一个 Web 应用或共享服务（如 PostgreSQL），部署到服务器。'
+              ? '点击右上角「新建应用」，创建 Web 应用或共享服务（如 PostgreSQL）。'
               : '先到「服务器」页添加并初始化一台服务器。'}
           </p>
-          {servers.length ? (
-            <button className="btn primary" onClick={onOpenCreate}>
-              <PlusIcon /> 新建
-            </button>
-          ) : (
+          {!servers.length && (
             <button className="btn ghost" onClick={onGoServers}>
               去添加服务器
             </button>
@@ -427,6 +460,7 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             const st = STATUS[app.status] || STATUS.idle
             const deploying = app.status === 'deploying' || busyId === app.id
             const isService = app.kind === 'service'
+            const stopped = app.status === 'stopped'
             return (
               <article key={app.id} className="glass-lite app-card reveal">
                 <div className="app-card-head">
@@ -475,7 +509,14 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                 </dl>
 
                 {app.notes && <p className="app-notes">{app.notes}</p>}
-                {app.envKeys.length > 0 && <p className="app-notes">环境变量：{app.envKeys.join('、')}</p>}
+                {app.envKeys.length > 0 && (
+                  <p className="app-notes" title={app.envKeys.join('、')}>
+                    环境变量：
+                    {app.envKeys.length > 4
+                      ? `${app.envKeys.slice(0, 4).join('、')} 等 ${app.envKeys.length} 个`
+                      : app.envKeys.join('、')}
+                  </p>
+                )}
                 {app.volumes?.some((v) => v.serveUrl) && (
                   <p className="app-notes">
                     媒体：{app.volumes.filter((v) => v.serveUrl).map((v) => v.serveUrl).join('、')}
@@ -485,21 +526,69 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                 {app.lastError && <p className="app-note err">{app.lastError}</p>}
 
                 <div className="app-actions">
-                  <button className="btn primary sm" onClick={() => deploy(app)} disabled={deploying || Boolean(busyId)}>
-                    {deploying ? (
-                      <>
-                        <span className="spinner" /> 部署中…
-                      </>
-                    ) : (
-                      <>
-                        <DeployIcon /> {app.status === 'running' ? '重新部署' : '部署'}
-                      </>
-                    )}
-                  </button>
-                  <button className="btn ghost sm" onClick={() => openEdit(app)} disabled={deploying}>
+                  {stopped ? (
+                    <button
+                      className="btn primary sm"
+                      onClick={() => startService(app)}
+                      disabled={deploying || Boolean(busyId) || Boolean(startingId) || stopping}
+                    >
+                      {startingId === app.id ? (
+                        <>
+                          <span className="spinner" /> 启动中…
+                        </>
+                      ) : (
+                        <>
+                          <DeployIcon /> 启动
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      className="btn primary sm"
+                      onClick={() => deploy(app)}
+                      disabled={deploying || Boolean(busyId) || Boolean(startingId) || stopping}
+                    >
+                      {deploying ? (
+                        <>
+                          <span className="spinner" /> 部署中…
+                        </>
+                      ) : (
+                        <>
+                          <DeployIcon /> {app.status === 'running' ? '重新部署' : '部署'}
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {stopped && (
+                    <button
+                      className="btn ghost sm"
+                      onClick={() => deploy(app)}
+                      disabled={deploying || Boolean(busyId) || Boolean(startingId) || stopping}
+                    >
+                      重新部署
+                    </button>
+                  )}
+                  {app.status === 'running' && (
+                    <button
+                      className="btn ghost sm"
+                      onClick={() => setStopTarget(app)}
+                      disabled={deploying || Boolean(busyId) || Boolean(startingId) || stopping}
+                    >
+                      停止
+                    </button>
+                  )}
+                  <button
+                    className="btn ghost sm"
+                    onClick={() => openEdit(app)}
+                    disabled={deploying || Boolean(startingId) || stopping}
+                  >
                     编辑
                   </button>
-                  <button className="btn ghost sm" onClick={() => askRemove(app)} disabled={deploying}>
+                  <button
+                    className="btn ghost sm"
+                    onClick={() => askRemove(app)}
+                    disabled={deploying || Boolean(startingId) || stopping}
+                  >
                     删除
                   </button>
                 </div>
@@ -792,6 +881,52 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             </button>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(stopTarget)}
+        onClose={() => {
+          if (!stopping) setStopTarget(null)
+        }}
+        title={stopTarget?.kind === 'service' ? '停止服务' : '停止应用'}
+      >
+        {stopTarget && (
+          <div className="form-grid">
+            <p className="confirm-lede">
+              {stopTarget.kind === 'service' ? '停止共享服务 ' : '停止应用 '}
+              <strong>{stopTarget.name}</strong>（
+              {stopTarget.kind === 'service'
+                ? `${stopTarget.service?.alias || `ourjia_${stopTarget.id}`}:${stopTarget.runtime.port}`
+                : stopTarget.domain || stopTarget.image || stopTarget.id}
+              ）？
+            </p>
+            <p className="form-hint">
+              容器会停止，
+              {stopTarget.kind === 'service' ? (
+                <>
+                  数据目录 <code>{stopTarget.service?.dataDir || '—'}</code> 会保留；依赖该服务的应用将暂时无法连接。
+                </>
+              ) : (
+                <>部署目录与数据卷会保留；期间域名 {stopTarget.domain || '—'} 无法访问。</>
+              )}
+              之后点「启动」即可重新拉起；需要应用配置变更时用「重新部署」。
+            </p>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setStopTarget(null)} disabled={stopping}>
+                取消
+              </button>
+              <button className="btn danger" onClick={confirmStop} disabled={stopping}>
+                {stopping ? (
+                  <>
+                    <span className="spinner" /> 停止中…
+                  </>
+                ) : (
+                  '停止'
+                )}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} title="删除应用">

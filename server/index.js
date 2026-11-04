@@ -8,10 +8,23 @@ import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
-import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript, readEnvEntries } from './apps.js'
+import { getApps, findApp, createApp, updateApp, deleteApp, publicApp, saveApps, buildCleanupScript, buildStopScript, buildStartScript, readEnvEntries } from './apps.js'
 import { runDeploy, planDeploySteps } from './deploy.js'
 import { scanServerResources, buildResourceCleanupScript } from './resources.js'
 import { listTemplates } from './templates.js'
+import {
+  getScripts,
+  findScript,
+  createScript,
+  updateScript,
+  deleteScript,
+  publicScript,
+  scriptDetail,
+  normalizeRunValues,
+  planScriptSteps,
+  runScriptJob,
+  saveScripts,
+} from './scripts.js'
 
 const PORT = Number(process.env.PORT) || 8787
 const now = () => new Date().toISOString()
@@ -25,11 +38,22 @@ function badRequest(message) {
   return err
 }
 
+// 脚本能直接执行任意命令，只允许本机操作，避免被局域网内其他人滥用
+function requireLocal(req) {
+  const ip = req.socket.remoteAddress
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+    throw badRequest('脚本管理仅允许在本机操作')
+  }
+}
+
 const wrap = (fn) => (req, res) => {
-  Promise.resolve(fn(req, res)).catch((err) => {
-    if (err?.type === 'entity.parse.failed') err = badRequest('请求体不是合法 JSON')
-    res.status(err.status || 500).json({ error: err.message || '服务器内部错误' })
-  })
+  // 用 Promise 包一层：同步 throw 也能进入统一错误处理（否则会被 Express 默认处理器接管）
+  Promise.resolve()
+    .then(() => fn(req, res))
+    .catch((err) => {
+      if (err?.type === 'entity.parse.failed') err = badRequest('请求体不是合法 JSON')
+      res.status(err.status || 500).json({ error: err.message || '服务器内部错误' })
+    })
 }
 
 function parseTarget(raw, rawPort) {
@@ -389,6 +413,52 @@ app.post('/api/apps/:id/deploy', wrap(async (req, res) => {
   })()
 }))
 
+// 手动停止：只停容器，不删数据目录；之后可手动启动
+app.post('/api/apps/:id/stop', wrap(async (req, res) => {
+  const rec = findApp(req.params.id)
+  if (!rec) throw badRequest('应用不存在')
+  const server = findServer(rec.serverId)
+  if (!server) throw badRequest('应用所属服务器不存在')
+  if (jobLocked(server.id)) throw badRequest('该服务器已有进行中的任务，请等待完成')
+
+  const result = await withConnection(server, (conn) =>
+    execScript(conn, buildStopScript(rec), { timeoutMs: 120000 }),
+  )
+  if (result.code !== 0) {
+    throw new Error(`停止失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+  }
+
+  rec.status = 'stopped'
+  rec.warning = null
+  rec.lastError = null
+  rec.updatedAt = new Date().toISOString()
+  saveApps()
+  res.json({ app: publicApp(rec), detail: result.stdout.trim() })
+}))
+
+// 手动启动：复用已有容器，不拉镜像、不改配置
+app.post('/api/apps/:id/start', wrap(async (req, res) => {
+  const rec = findApp(req.params.id)
+  if (!rec) throw badRequest('应用不存在')
+  const server = findServer(rec.serverId)
+  if (!server) throw badRequest('应用所属服务器不存在')
+  if (jobLocked(server.id)) throw badRequest('该服务器已有进行中的任务，请等待完成')
+
+  const result = await withConnection(server, (conn) =>
+    execScript(conn, buildStartScript(rec), { timeoutMs: 120000 }),
+  )
+  if (result.code !== 0) {
+    throw new Error(`启动失败：${result.stderr.trim() || `退出码 ${result.code}`}`)
+  }
+
+  rec.status = 'running'
+  rec.warning = null
+  rec.lastError = null
+  rec.updatedAt = new Date().toISOString()
+  saveApps()
+  res.json({ app: publicApp(rec), detail: result.stdout.trim() })
+}))
+
 app.get('/api/servers/:id/resources', wrap(async (req, res) => {
   const rec = findServer(req.params.id)
   if (!rec) throw badRequest('服务器不存在')
@@ -427,6 +497,88 @@ app.post('/api/servers/:id/resources/cleanup', wrap(async (req, res) => {
     return result.stdout.trim()
   })
   res.json({ ok: true, removed: { containers, paths }, detail })
+}))
+
+app.get('/api/scripts', wrap((_req, res) => {
+  res.json({ scripts: getScripts().map(publicScript) })
+}))
+
+app.post('/api/scripts', wrap((req, res) => {
+  requireLocal(req)
+  const server = findServer(String(req.body?.serverId || ''))
+  if (!server) throw badRequest('服务器不存在')
+  const rec = createScript({ ...req.body, serverId: server.id }, server)
+  res.json({ script: publicScript(rec) })
+}))
+
+app.get('/api/scripts/:id', wrap((req, res) => {
+  requireLocal(req)
+  const rec = findScript(req.params.id)
+  if (!rec) throw badRequest('脚本不存在')
+  res.json({ script: scriptDetail(rec) })
+}))
+
+app.put('/api/scripts/:id', wrap((req, res) => {
+  requireLocal(req)
+  const rec = findScript(req.params.id)
+  if (!rec) throw badRequest('脚本不存在')
+  const server = findServer(String(req.body?.serverId || rec.serverId))
+  if (!server) throw badRequest('服务器不存在')
+  const updated = updateScript(rec, req.body || {}, server)
+  res.json({ script: publicScript(updated) })
+}))
+
+app.delete('/api/scripts/:id', wrap((req, res) => {
+  requireLocal(req)
+  const rec = findScript(req.params.id)
+  if (!rec) throw badRequest('脚本不存在')
+  deleteScript(rec.id)
+  res.json({ ok: true })
+}))
+
+app.post('/api/scripts/:id/run', wrap((req, res) => {
+  requireLocal(req)
+  const rec = findScript(req.params.id)
+  if (!rec) throw badRequest('脚本不存在')
+  // 运行时可以指定服务器；不指定就用脚本配置的默认服务器
+  const requestedServerId = String(req.body?.serverId || '').trim()
+  const server = findServer(requestedServerId || rec.serverId)
+  if (!server) {
+    throw badRequest(
+      requestedServerId ? '要执行的服务器不存在或已被删除' : '脚本的默认服务器已被删除，请在运行时选择服务器',
+    )
+  }
+  if (jobLocked(server.id)) throw badRequest('该服务器已有进行中的任务，请等待完成')
+
+  // 先确认内容/变量能解密，并校验运行时参数，避免任务启动后才失败
+  let values
+  try {
+    scriptDetail(rec)
+    values = normalizeRunValues(req.body?.values, Array.isArray(rec.params) ? rec.params : [])
+  } catch (err) {
+    throw badRequest(err.message)
+  }
+
+  const job = createJob(server.id, 'script', planScriptSteps())
+  if (!acquireLock(server.id, job.id)) throw badRequest('该服务器已有进行中的任务')
+  res.json({ job: snapshot(job), script: publicScript(rec) })
+
+  ;(async () => {
+    let conn
+    try {
+      conn = await connectSSH(serverCredentials(server))
+      await runScriptJob(job, conn, server, rec, values)
+    } catch (err) {
+      const { setJobState, appendLog } = await import('./jobs.js')
+      appendLog(job, `连接失败：${err.message}`, 'err')
+      setJobState(job, 'failed', err.message)
+      rec.lastRun = { at: now(), status: 'failed', error: err.message, jobId: job.id, serverId: server.id }
+      saveScripts()
+    } finally {
+      conn?.end()
+      releaseLock(server.id)
+    }
+  })()
 }))
 
 app.get('/api/jobs/:id', wrap((req, res) => {
