@@ -14,12 +14,55 @@ export function planDeploySteps(app) {
       { id: 'deploy', title: '启动共享服务' },
     ]
   }
-  return [
+  const steps = [
     { id: 'config', title: '生成并上传部署配置' },
     { id: 'pull', title: '拉取镜像' },
     { id: 'deploy', title: '启动容器' },
-    { id: 'health', title: '健康检查' },
   ]
+  // 媒体卷以宿主机目录 bind mount 进来，属主由部署时的 chown 决定；
+  // 镜像以非 root 运行时，必须先确认容器用户真的能写，否则上传要到运行时才 500。
+  if (Array.isArray(app?.volumes) && app.volumes.length > 0) {
+    steps.push({ id: 'media', title: '检查数据卷写权限' })
+  }
+  steps.push({ id: 'health', title: '健康检查' })
+  return steps
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
+// 用容器自己的用户执行一次写测试，提前暴露宿主机目录属主与容器 UID 不一致的问题
+export function buildVolumeCheckScript(app) {
+  const volumes = (app?.volumes || []).filter((volume) => volume?.mountPath)
+  if (!volumes.length) return null
+  const container = `ourjia_${app.id}`
+  const lines = [
+    'set -e',
+    `CONTAINER=${shellQuote(container)}`,
+    'if ! docker ps --format "{{.Names}}" | grep -Fxq "$CONTAINER"; then',
+    '  echo "容器 $CONTAINER 未运行，无法检查数据卷写权限" >&2',
+    '  exit 1',
+    'fi',
+  ]
+  for (const volume of volumes) {
+    const path = shellQuote(volume.mountPath)
+    lines.push(
+      `if ! docker exec "$CONTAINER" sh -c 'mkdir -p "$1" && touch "$1/.ourjia-write-test" && rm -f "$1/.ourjia-write-test"' sh ${path}; then`,
+    )
+    lines.push('  uid=$(docker exec "$CONTAINER" id -u 2>/dev/null || echo "?")')
+    lines.push('  gid=$(docker exec "$CONTAINER" id -g 2>/dev/null || echo "?")')
+    lines.push(
+      `  echo "数据卷 ${volume.name}（${volume.mountPath}）不可写：容器用户 \${uid}:\${gid} 无法写入。" >&2`,
+    )
+    lines.push(
+      `  echo "请在应用编辑页把「目录所有者」设置为 \${uid}:\${gid}，然后重新部署。" >&2`,
+    )
+    lines.push('  exit 1')
+    lines.push('fi')
+  }
+  lines.push('echo "数据卷写权限检查通过"')
+  return lines.join('\n')
 }
 
 function labelLines(app) {
@@ -322,13 +365,20 @@ async function deployImage(job, conn, app) {
   await execScript(conn, `mkdir -p ${dir} && chmod 700 ${dir}`, { timeoutMs: 15000 })
   for (const volume of app.volumes || []) {
     const lines = [`mkdir -p ${volume.hostPath}`]
-    if (volume.owner) lines.push(`chown ${volume.owner} ${volume.hostPath}`)
+    if (volume.owner) lines.push(`chown -R ${volume.owner} ${volume.hostPath}`)
     await execScript(conn, lines.join('\n'), { timeoutMs: 15000 })
     appendLog(
       job,
-      `数据卷 ${volume.name}：${volume.hostPath} → ${volume.mountPath}${volume.serveUrl ? `（${volume.serveUrl} 由 nginx 提供）` : ''}`,
+      `数据卷 ${volume.name}：${volume.hostPath} → ${volume.mountPath}${volume.owner ? `（所有者 ${volume.owner}）` : '（未设置所有者，目录归 root）'}${volume.serveUrl ? `（${volume.serveUrl} 由 nginx 提供）` : ''}`,
       'note',
     )
+    if (!volume.owner) {
+      appendLog(
+        job,
+        `⚠ 数据卷 ${volume.name} 未设置所有者；如果容器以非 root 用户运行，写入会失败。`,
+        'err',
+      )
+    }
   }
   const compose = buildImageCompose(app, env)
   await sftpWrite(conn, `${dir}/docker-compose.yml`, compose, 0o600)
@@ -365,6 +415,12 @@ async function deployImage(job, conn, app) {
 
   await runStep(job, conn, 'deploy', buildImageUpScript(app), 300000, '启动容器')
   flushCarry(job)
+
+  const volumeCheck = buildVolumeCheckScript(app)
+  if (volumeCheck) {
+    await runStep(job, conn, 'media', volumeCheck, 30000, '检查数据卷写权限')
+    flushCarry(job)
+  }
 
   await runStep(job, conn, 'health', buildHealthScript(app), 180000, '经 Traefik 健康检查')
   flushCarry(job)

@@ -732,11 +732,11 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
                       </div>
                     </div>
                     <div className="field">
-                      <label>目录所有者（可选）</label>
-                      <input value={mediaOwner} onChange={(e) => setMediaOwner(e.target.value)} placeholder="1000:1000" />
+                      <label>目录所有者（容器用户 UID:GID，可选）</label>
+                      <input value={mediaOwner} onChange={(e) => setMediaOwner(e.target.value)} placeholder="10001:10001" />
                     </div>
                     <p className="form-hint">
-                      平台会创建 /srv/data/&lt;应用ID&gt;/media 并挂载；填写 URL 后自动生成 nginx sidecar。
+                      平台会创建 /srv/data/&lt;应用ID&gt;/media 并挂载。镜像以非 root 用户运行时（如 Dockerfile 里的 USER app），请填容器用户的 UID:GID（例如 10001:10001）；留空时目录归 root，容器可能无法写入上传文件。
                     </p>
                   </>
                 )}
