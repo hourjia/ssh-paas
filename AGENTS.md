@@ -24,6 +24,7 @@
 - HTTPS：证书由 Traefik 的 ACME（Let's Encrypt）自动签发/续期，默认 90 天有效期，平台不管理证书时长；HSTS 由 Traefik 在应用路由上下发 `max-age=31536000`（`deploy.js` 的 `hstsLabels`），会覆盖应用自己发的 STS 头。暂不启用 `includeSubDomains`/`preload`：子域还有只跑 HTTP 的（例如 `www` 目前没有证书），而 preload 很难撤回
 
 ## 常用命令
+- 依赖用 `npm ci` 安装（分别在 `server/`、`web/` 执行；`package-lock.json` 已提交，避免 `^` 范围带来的版本漂移），装完再 `npm run build`
 - `npm run dev:server` 启动后端（node --watch）
 - `npm run dev:web` 启动前端
 - `npm run build` 构建前端（tsc --noEmit + vite build）
