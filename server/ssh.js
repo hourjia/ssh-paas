@@ -1,3 +1,4 @@
+import path from 'node:path'
 import ssh2 from 'ssh2'
 
 const { Client, utils } = ssh2
@@ -139,6 +140,44 @@ export function sftpWrite(conn, remotePath, content, mode = 0o644) {
       stream.on('error', finish)
       stream.on('close', () => sftp.chmod(remotePath, mode, finish))
       stream.end(Buffer.from(content, 'utf8'))
+    })
+  })
+}
+
+// 远端目录可能不存在：逐级创建（只用 SFTP，不依赖远端 mkdir 命令）
+function sftpMkdirp(sftp, dir, cb) {
+  if (!dir || dir === '/' || dir === '.') return cb(null)
+  sftp.stat(dir, (err) => {
+    if (!err) return cb(null)
+    sftpMkdirp(sftp, path.posix.dirname(dir), (parentErr) => {
+      if (parentErr) return cb(parentErr)
+      sftp.mkdir(dir, { mode: 0o755 }, (mkdirErr) => {
+        // 4 = SSH_FX_FAILURE：并发创建时目录已存在，忽略
+        if (mkdirErr && mkdirErr.code !== 4) return cb(mkdirErr)
+        cb(null)
+      })
+    })
+  })
+}
+
+// 把本机文件上传到远端（用于脚本的文件参数），onProgress(已传字节, 总字节)
+export function sftpUpload(conn, localPath, remotePath, { mode = 0o644, onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    conn.sftp((err, sftp) => {
+      if (err) return reject(new Error(friendlySshError(err)))
+      const finish = (e) => {
+        sftp.end()
+        if (e) reject(e)
+        else resolve()
+      }
+      sftpMkdirp(sftp, path.posix.dirname(remotePath), (mkdirErr) => {
+        if (mkdirErr) return finish(new Error(`创建远端目录失败：${mkdirErr.message}`))
+        const options = { mode, step: (transferred, _chunk, total) => onProgress?.(transferred, total) }
+        sftp.fastPut(localPath, remotePath, options, (putErr) => {
+          if (putErr) return finish(new Error(friendlySshError(putErr)))
+          sftp.chmod(remotePath, mode, (chmodErr) => finish(chmodErr ? new Error(chmodErr.message) : null))
+        })
+      })
     })
   })
 }

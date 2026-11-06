@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import * as api from '../api'
-import type { ScriptDetail, ScriptEnvEntry, ScriptParam, ScriptPayload, ScriptRecord, ServerRecord } from '../types'
+import type {
+  AppRecord,
+  ScriptDetail,
+  ScriptEnvEntry,
+  ScriptParam,
+  ScriptPayload,
+  ScriptRecord,
+  ServerRecord,
+} from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
 import { PageHeader } from '../components/PageHeader'
@@ -24,6 +32,9 @@ const EMPTY_FORM = {
   useSudo: false,
   notes: '',
   timeoutSec: '600',
+  uploadDir: '',
+  appId: '',
+  container: '',
 }
 
 const DEFAULT_SCRIPT = `#!/usr/bin/env bash
@@ -33,6 +44,19 @@ set -euo pipefail
 echo "hello from ourjia-paas"
 `
 
+function formatBytes(bytes: number) {
+  const value = Number(bytes) || 0
+  if (value < 1024) return `${value} B`
+  const units = ['KB', 'MB', 'GB']
+  let size = value / 1024
+  let i = 0
+  while (size >= 1024 && i < units.length - 1) {
+    size /= 1024
+    i += 1
+  }
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[i]}`
+}
+
 const LAST_RUN: Record<'ok' | 'failed' | 'idle', { cls: string; label: string }> = {
   ok: { cls: 'st-run', label: '上次成功' },
   failed: { cls: 'st-err', label: '上次失败' },
@@ -41,6 +65,7 @@ const LAST_RUN: Record<'ok' | 'failed' | 'idle', { cls: string; label: string }>
 
 export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onGoServers, onToast }: ScriptsPageProps) {
   const [scripts, setScripts] = useState<ScriptRecord[]>([])
+  const [apps, setApps] = useState<AppRecord[]>([])
   const [loaded, setLoaded] = useState(false)
 
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -60,15 +85,19 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
   const [runTarget, setRunTarget] = useState<ScriptRecord | null>(null)
   const [runServerId, setRunServerId] = useState('')
   const [runValues, setRunValues] = useState<Record<string, string>>({})
+  const [runFiles, setRunFiles] = useState<Record<string, File>>({})
+  const [uploading, setUploading] = useState<{ key: string; pct: number } | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
+  const runFileRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   const [deleteTarget, setDeleteTarget] = useState<ScriptRecord | null>(null)
   const [deleting, setDeleting] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      const { scripts: list } = await api.listScripts()
+      const [{ scripts: list }, { apps: appList }] = await Promise.all([api.listScripts(), api.listApps()])
       setScripts(list)
+      setApps(appList)
     } catch (e) {
       onToast(e instanceof Error ? e.message : '加载脚本失败')
     } finally {
@@ -143,18 +172,24 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
   )
 
   const startRun = useCallback(
-    async (script: ScriptRecord, targetServerId: string, values: Record<string, string>) => {
+    async (
+      script: ScriptRecord,
+      targetServerId: string,
+      values: Record<string, string>,
+      uploads: Record<string, string>,
+    ) => {
       if (busyId) return
       if (!targetServerId) {
         setRunError('请选择要执行的服务器')
         return
       }
       setRunTarget(null)
+      setRunFiles({})
       setBusyId(script.id)
       setLogs([])
       setLogTitle(`执行 ${script.name} · 终端输出`)
       try {
-        const { job } = await api.runScript(script.id, targetServerId, values)
+        const { job } = await api.runScript(script.id, targetServerId, values, uploads)
         attachStream(job.id)
       } catch (e) {
         setBusyId(null)
@@ -180,6 +215,8 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
       }
       const fallback = servers.some((s) => s.id === script.serverId) ? script.serverId : servers[0]?.id || ''
       setRunValues(defaults)
+      setRunFiles({})
+      setUploading(null)
       setRunServerId(fallback)
       setRunError(null)
       setRunTarget(script)
@@ -187,21 +224,48 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
     [busyId, servers],
   )
 
-  const confirmRun = useCallback(() => {
-    if (!runTarget || busyId) return
+  // 文件参数：先把文件传到平台暂存区（有进度），拿到 token 后再启动任务；
+  // 运行时平台再把文件 SFTP 到服务器上的上传目录
+  const confirmRun = useCallback(async () => {
+    if (!runTarget || busyId || uploading) return
     if (!runServerId || !servers.some((server) => server.id === runServerId)) {
       setRunError('请选择要执行的服务器')
       return
     }
     const missing = runTarget.params.find(
-      (param) => param.required && !String(runValues[param.key] ?? '').trim(),
+      (param) => param.required && param.type !== 'file' && !String(runValues[param.key] ?? '').trim(),
     )
     if (missing) {
       setRunError(`参数「${missing.label || missing.key}」不能为空`)
       return
     }
-    void startRun(runTarget, runServerId, runValues)
-  }, [busyId, runServerId, runTarget, runValues, servers, startRun])
+    const missingFile = runTarget.params.find((param) => param.type === 'file' && !runFiles[param.key])
+    if (missingFile) {
+      setRunError(`请选择文件：${missingFile.label || missingFile.key}`)
+      return
+    }
+
+    const uploads: Record<string, string> = {}
+    for (const param of runTarget.params) {
+      if (param.type !== 'file') continue
+      const file = runFiles[param.key]
+      if (!file) continue
+      setUploading({ key: param.key, pct: 0 })
+      try {
+        const ticket = await api.uploadFile(file, (loaded, total) => {
+          const pct = total > 0 ? Math.floor((loaded / total) * 100) : 0
+          setUploading({ key: param.key, pct })
+        })
+        uploads[param.key] = ticket.token
+      } catch (e) {
+        setUploading(null)
+        setRunError(e instanceof Error ? e.message : '文件上传失败')
+        return
+      }
+    }
+    setUploading(null)
+    void startRun(runTarget, runServerId, runValues, uploads)
+  }, [busyId, runFiles, runServerId, runTarget, runValues, servers, startRun, uploading])
 
   const openEdit = useCallback(
     async (script: ScriptRecord) => {
@@ -217,6 +281,9 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
           useSudo: detail.useSudo,
           notes: detail.notes || '',
           timeoutSec: String(detail.timeoutSec),
+          uploadDir: detail.uploadDir || '',
+          appId: detail.appId || '',
+          container: detail.appId ? '' : detail.container || '',
         })
         setEnvRows(detail.env)
         setParamRows(detail.params)
@@ -304,6 +371,9 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
         useSudo: form.useSudo,
         notes: form.notes.trim(),
         timeoutSec: Number(form.timeoutSec) || 600,
+        uploadDir: form.uploadDir.trim(),
+        appId: form.appId,
+        container: form.appId ? '' : form.container.trim(),
       }
       if (editing) {
         const { script } = await api.updateScript(editing.id, payload)
@@ -342,6 +412,7 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
     [runServerId, servers],
   )
   const sudoTarget = form.runAs.trim() || 'root'
+  const hasFileParam = paramRows.some((row) => row.type === 'file')
   const runSudoTarget = runTarget?.useSudo ? runTarget.runAs || 'root' : ''
   const runUser = runServer?.user || ''
   const runIdentity = runTarget
@@ -463,6 +534,17 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
                       : script.params.map((param) => param.key).join('、')}
                   </p>
                 )}
+                {script.container && (
+                  <p className="app-notes mono" title={script.container}>
+                    容器：{script.container}
+                    {script.appId ? ` · ${script.appName || '应用已删除'}` : ' · 手填'}
+                  </p>
+                )}
+                {script.uploadDir && (
+                  <p className="app-notes mono" title={script.uploadDir}>
+                    上传目录：{script.uploadDir}
+                  </p>
+                )}
                 {script.lastRun.status === 'failed' && (
                   <p className="app-note err">{script.lastRun.error || '上次运行失败'}</p>
                 )}
@@ -518,6 +600,46 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
             </select>
             <p className="form-hint">
               这里只配置默认目标；运行时还可以改选其他服务器，执行用户会自动使用目标服务器的 SSH 用户。
+            </p>
+          </div>
+
+          <div className="field">
+            <label>目标应用</label>
+            <select
+              value={form.appId}
+              onChange={(e) => {
+                const appId = e.target.value
+                patchForm({ appId, container: appId ? '' : form.container })
+              }}
+            >
+              <option value="">不绑定（手动填写容器名）</option>
+              {apps.map((app) => (
+                <option key={app.id} value={app.id}>
+                  {app.name}（ourjia_{app.id}）
+                  {app.serverId !== serverId ? ` · ${serverName(app.serverId)}` : ''}
+                </option>
+              ))}
+            </select>
+            {form.appId ? (
+              <div className="identity-box">
+                <span className="mono">ourjia_{form.appId}</span>
+                <span>容器名由平台自动推导，脚本里用 $APP_CONTAINER</span>
+              </div>
+            ) : (
+              <>
+                <input
+                  className="mono"
+                  value={form.container}
+                  onChange={(e) => patchForm({ container: e.target.value })}
+                  placeholder="ourjia_app_2535046669a9（可选）"
+                />
+                <p className="form-hint">
+                  只有应用不在上面的列表里（例如容器不是本平台部署的）才需要手填；留空则平台不注入容器名。
+                </p>
+              </>
+            )}
+            <p className="form-hint">
+              绑定应用后容器名与部署时一致（container_name = ourjia_&lt;应用 ID&gt;），运行时作为 $APP_CONTAINER 传给脚本。
             </p>
           </div>
 
@@ -644,18 +766,23 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
                     onChange={(e) => updateParamRow(index, { label: e.target.value })}
                   />
                   <select
-                    value={row.type === 'bool' ? 'bool' : 'text'}
+                    value={row.type === 'bool' ? 'bool' : row.type === 'file' ? 'file' : 'text'}
                     title="参数类型"
                     onChange={(e) => {
-                      const type = e.target.value === 'bool' ? 'bool' : 'text'
+                      const type = e.target.value === 'bool' ? 'bool' : e.target.value === 'file' ? 'file' : 'text'
                       updateParamRow(
                         index,
-                        type === 'bool' ? { type, defaultValue: 'false', required: false } : { type },
+                        type === 'bool'
+                          ? { type, defaultValue: 'false', required: false }
+                          : type === 'file'
+                            ? { type, defaultValue: '', required: true }
+                            : { type },
                       )
                     }}
                   >
                     <option value="text">文本</option>
                     <option value="bool">开关</option>
+                    <option value="file">文件</option>
                   </select>
                   {row.type === 'bool' ? (
                     <select
@@ -666,6 +793,8 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
                       <option value="false">默认关闭</option>
                       <option value="true">默认开启</option>
                     </select>
+                  ) : row.type === 'file' ? (
+                    <input className="mono" value="" placeholder="运行时选择文件" disabled readOnly />
                   ) : (
                     <input
                       className="mono"
@@ -676,12 +805,18 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
                   )}
                   <label
                     className="param-required"
-                    title={row.type === 'bool' ? '开关参数不需要必填' : '运行时必填'}
+                    title={
+                      row.type === 'bool'
+                        ? '开关参数不需要必填'
+                        : row.type === 'file'
+                          ? '文件参数每次运行都必须选文件'
+                          : '运行时必填'
+                    }
                   >
                     <input
                       type="checkbox"
-                      checked={row.required}
-                      disabled={row.type === 'bool'}
+                      checked={row.type === 'file' ? true : row.required}
+                      disabled={row.type === 'bool' || row.type === 'file'}
                       onChange={(e) => updateParamRow(index, { required: e.target.checked })}
                     />
                     必填
@@ -696,9 +831,26 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
               </button>
             </div>
             <p className="form-hint">
-              运行时弹窗填写，作为环境变量注入脚本；参数值不会保存，参数名不能与固定环境变量重名。类型为「开关」的参数在运行弹窗里显示为勾选框。
+              运行时弹窗填写，作为环境变量注入脚本；参数值不会保存，参数名不能与固定环境变量重名。类型为「开关」的参数在运行弹窗里显示为勾选框；
+              「文件」参数在运行弹窗里选文件上传，脚本里拿到的是文件在服务器上的绝对路径。
             </p>
           </div>
+
+          {hasFileParam && (
+            <div className="field">
+              <label>上传目录</label>
+              <input
+                className="mono"
+                value={form.uploadDir}
+                onChange={(e) => patchForm({ uploadDir: e.target.value })}
+                placeholder="/tmp/ourjia-release"
+              />
+              <p className="form-hint">
+                文件参数会先传到平台，运行脚本时再 SFTP 到这个目录（服务器上的绝对路径，需要 SSH 用户可写）；
+                脚本里用 $参数名 拿到文件路径，用完请自行清理。
+              </p>
+            </div>
+          )}
 
           <div className="field">
             <label>备注（可选）</label>
@@ -733,7 +885,7 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
       <Modal
         open={Boolean(runTarget)}
         onClose={() => {
-          if (!busyId) setRunTarget(null)
+          if (!busyId && !uploading) setRunTarget(null)
         }}
         title={runTarget ? `运行 · ${runTarget.name}` : '运行脚本'}
       >
@@ -782,28 +934,90 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
               </div>
             </div>
 
+            {runTarget.container ? (
+              <p className="form-hint">
+                目标容器 <span className="mono">{runTarget.container}</span>
+                {runTarget.appId ? `（${runTarget.appName || '应用已删除'}）` : '（手填容器名）'}，脚本里用 $APP_CONTAINER 取用。
+              </p>
+            ) : (
+              <p className="form-hint">
+                脚本没有绑定应用，也没有手填容器名；脚本里如果需要容器名，请先在「编辑」里设置。
+              </p>
+            )}
+
             {runTarget.useSudo && runSudoTarget !== runUser && (
               <p className="form-hint">
                 将通过 sudo -n 以 {runSudoTarget} 执行；目标服务器的 SSH 用户 {runUser || '—'} 需要已配置免密 sudo。
               </p>
             )}
 
-            {runTarget.params.map((param) =>
-              param.type === 'bool' ? (
-                <label className="check-row" key={param.key}>
-                  <input
-                    type="checkbox"
-                    checked={runValues[param.key] === 'true'}
-                    onChange={(e) =>
-                      setRunValues((cur) => ({ ...cur, [param.key]: e.target.checked ? 'true' : 'false' }))
-                    }
-                  />
-                  <span>
-                    {param.label || param.key}
-                    <code className="param-key">{param.key}</code>
-                  </span>
-                </label>
-              ) : (
+            {runTarget.params.map((param) => {
+              if (param.type === 'bool') {
+                return (
+                  <label className="check-row" key={param.key}>
+                    <input
+                      type="checkbox"
+                      checked={runValues[param.key] === 'true'}
+                      onChange={(e) =>
+                        setRunValues((cur) => ({ ...cur, [param.key]: e.target.checked ? 'true' : 'false' }))
+                      }
+                    />
+                    <span>
+                      {param.label || param.key}
+                      <code className="param-key">{param.key}</code>
+                    </span>
+                  </label>
+                )
+              }
+              if (param.type === 'file') {
+                const picked = runFiles[param.key]
+                return (
+                  <div className="field" key={param.key}>
+                    <label>
+                      {param.label || param.key}
+                      <span className="req">*</span>
+                      <code className="param-key">{param.key}</code>
+                    </label>
+                    <div className="file-row">
+                      <input
+                        className="mono"
+                        value={picked ? `${picked.name}（${formatBytes(picked.size)}）` : ''}
+                        placeholder="点击「选择文件」"
+                        readOnly
+                        onClick={() => runFileRefs.current[param.key]?.click()}
+                      />
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={() => runFileRefs.current[param.key]?.click()}
+                        disabled={Boolean(uploading)}
+                      >
+                        选择文件
+                      </button>
+                      <input
+                        ref={(el) => {
+                          runFileRefs.current[param.key] = el
+                        }}
+                        type="file"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0]
+                          e.target.value = ''
+                          if (!file) return
+                          setRunFiles((cur) => ({ ...cur, [param.key]: file }))
+                          setRunError(null)
+                        }}
+                      />
+                    </div>
+                    <p className="form-hint">
+                      {runTarget.uploadDir
+                        ? `先传到平台，再 SFTP 到 ${runTarget.uploadDir}/${picked?.name || '文件名'}；脚本里用 $${param.key} 取路径`
+                        : '脚本还没有配置上传目录，请先编辑脚本填写'}
+                    </p>
+                  </div>
+                )
+              }
+              return (
                 <div className="field" key={param.key}>
                   <label>
                     {param.label || param.key}
@@ -816,11 +1030,17 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
                     placeholder={param.defaultValue || '请输入'}
                     onChange={(e) => setRunValues((cur) => ({ ...cur, [param.key]: e.target.value }))}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') confirmRun()
+                      if (e.key === 'Enter') void confirmRun()
                     }}
                   />
                 </div>
-              ),
+              )
+            })}
+
+            {uploading && (
+              <p className="form-hint">
+                正在上传文件到平台：{Math.min(uploading.pct, 100)}%（传完才开始执行脚本）
+              </p>
             )}
 
             <p className="form-hint">
@@ -832,13 +1052,21 @@ export function ScriptsPage({ servers, createOpen, onOpenCreate, onCloseCreate, 
             {runError && <div className="form-error">{runError}</div>}
 
             <div className="modal-foot">
-              <button className="btn ghost" onClick={() => setRunTarget(null)} disabled={Boolean(busyId)}>
+              <button
+                className="btn ghost"
+                onClick={() => setRunTarget(null)}
+                disabled={Boolean(busyId) || Boolean(uploading)}
+              >
                 取消
               </button>
-              <button className="btn primary" onClick={confirmRun} disabled={Boolean(busyId) || !runServerId}>
-                {busyId ? (
+              <button
+                className="btn primary"
+                onClick={() => void confirmRun()}
+                disabled={Boolean(busyId) || Boolean(uploading) || !runServerId}
+              >
+                {busyId || uploading ? (
                   <>
-                    <span className="spinner" /> 执行中…
+                    <span className="spinner" /> {uploading ? `上传中 ${Math.min(uploading.pct, 100)}%` : '执行中…'}
                   </>
                 ) : (
                   '运行'

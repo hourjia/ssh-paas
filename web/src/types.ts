@@ -264,8 +264,8 @@ export interface ScriptParam {
   label: string
   defaultValue: string
   required: boolean
-  // text：普通文本输入；bool：运行弹窗里的开关
-  type?: 'text' | 'bool'
+  // text：普通文本输入；bool：运行弹窗里的开关；file：运行弹窗里选文件上传
+  type?: 'text' | 'bool' | 'file'
 }
 
 export interface ScriptLastRun {
@@ -285,6 +285,13 @@ export interface ScriptRecord {
   notes: string
   envKeys: string[]
   params: ScriptParam[]
+  // 绑定的应用（容器名自动推导 ourjia_<appId>）；未绑定时为 null
+  appId: string | null
+  appName: string | null
+  // 实际使用的容器名：绑定应用时由平台推导，否则是手填值；都没有时为 null
+  container: string | null
+  // 文件参数的上传目录（服务器上的绝对路径）；没有文件参数时为 null
+  uploadDir: string | null
   runAs: string | null
   useSudo: boolean
   timeoutSec: number
@@ -305,6 +312,9 @@ export interface ScriptPayload {
   content: string
   env: ScriptEnvEntry[]
   params: ScriptParam[]
+  appId?: string
+  container?: string
+  uploadDir?: string
   runAs?: string
   useSudo: boolean
   notes?: string

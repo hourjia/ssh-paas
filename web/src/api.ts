@@ -167,10 +167,49 @@ export function deleteScript(id: string) {
   return request<{ ok: boolean }>(`/api/scripts/${id}`, { method: 'DELETE' })
 }
 
-export function runScript(id: string, serverId: string, values: Record<string, string> = {}) {
+export function runScript(
+  id: string,
+  serverId: string,
+  values: Record<string, string> = {},
+  uploads: Record<string, string> = {},
+) {
   return request<{ job: JobSnapshot; script: ScriptRecord }>(`/api/scripts/${id}/run`, {
     method: 'POST',
-    body: JSON.stringify({ serverId, values }),
+    body: JSON.stringify({ serverId, values, uploads }),
+  })
+}
+
+export interface UploadTicket {
+  token: string
+  name: string
+  size: number
+}
+
+// 把脚本要用的文件传到平台暂存区，拿到 token 后再运行脚本（运行时平台再 SFTP 到目标服务器）
+export function uploadFile(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<UploadTicket> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `/api/uploads?name=${encodeURIComponent(file.name)}`)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total)
+    }
+    xhr.onload = () => {
+      let data: { upload?: UploadTicket; error?: string } = {}
+      try {
+        data = JSON.parse(xhr.responseText) as { upload?: UploadTicket; error?: string }
+      } catch {
+        data = {}
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && data.upload) resolve(data.upload)
+      else reject(new Error(data.error || `上传失败（HTTP ${xhr.status}）`))
+    }
+    xhr.onerror = () => reject(new Error('上传失败：网络中断'))
+    xhr.onabort = () => reject(new Error('上传已取消'))
+    xhr.send(file)
   })
 }
 

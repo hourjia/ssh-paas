@@ -21,10 +21,12 @@ import {
   publicScript,
   scriptDetail,
   normalizeRunValues,
+  normalizeRunUploads,
   planScriptSteps,
   runScriptJob,
   saveScripts,
 } from './scripts.js'
+import { saveUploadStream } from './uploads.js'
 
 const PORT = Number(process.env.PORT) || 8787
 const now = () => new Date().toISOString()
@@ -536,6 +538,14 @@ app.delete('/api/scripts/:id', wrap((req, res) => {
   res.json({ ok: true })
 }))
 
+// 脚本的文件参数：浏览器先把文件传到本机暂存区，运行脚本时再 SFTP 到目标服务器
+// 请求体就是文件本身（application/octet-stream），文件名放在 ?name= 里
+app.post('/api/uploads', wrap(async (req, res) => {
+  requireLocal(req)
+  const upload = await saveUploadStream(req, String(req.query?.name || ''))
+  res.json({ upload })
+}))
+
 app.post('/api/scripts/:id/run', wrap((req, res) => {
   requireLocal(req)
   const rec = findScript(req.params.id)
@@ -550,16 +560,19 @@ app.post('/api/scripts/:id/run', wrap((req, res) => {
   }
   if (jobLocked(server.id)) throw badRequest('该服务器已有进行中的任务，请等待完成')
 
-  // 先确认内容/变量能解密，并校验运行时参数，避免任务启动后才失败
+  // 先确认内容/变量能解密，并校验运行时参数与上传文件，避免任务启动后才失败
+  const params = Array.isArray(rec.params) ? rec.params : []
   let values
+  let uploads
   try {
     scriptDetail(rec)
-    values = normalizeRunValues(req.body?.values, Array.isArray(rec.params) ? rec.params : [])
+    values = normalizeRunValues(req.body?.values, params)
+    uploads = normalizeRunUploads(req.body?.uploads, params)
   } catch (err) {
     throw badRequest(err.message)
   }
 
-  const job = createJob(server.id, 'script', planScriptSteps())
+  const job = createJob(server.id, 'script', planScriptSteps(rec))
   if (!acquireLock(server.id, job.id)) throw badRequest('该服务器已有进行中的任务')
   res.json({ job: snapshot(job), script: publicScript(rec) })
 
@@ -567,7 +580,7 @@ app.post('/api/scripts/:id/run', wrap((req, res) => {
     let conn
     try {
       conn = await connectSSH(serverCredentials(server))
-      await runScriptJob(job, conn, server, rec, values)
+      await runScriptJob(job, conn, server, rec, values, uploads)
     } catch (err) {
       const { setJobState, appendLog } = await import('./jobs.js')
       appendLog(job, `连接失败：${err.message}`, 'err')

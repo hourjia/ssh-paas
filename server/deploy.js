@@ -65,6 +65,18 @@ export function buildVolumeCheckScript(app) {
   return lines.join('\n')
 }
 
+// HSTS 由 Traefik 统一下发：HTTPS 证书确认稳定后，把浏览器强制 HTTPS 的记忆
+// 从 1 天提高到 1 年。暂不开启 includeSubDomains/preload —— 子域仍有只跑 HTTP 的
+// （例如 www 目前没有证书），而 preload 一旦被浏览器收录很难撤回。
+const HSTS_SECONDS = 31536000
+
+function hstsLabels(router) {
+  return [
+    `      - "traefik.http.routers.${router}.middlewares=${router}-hsts"`,
+    `      - "traefik.http.middlewares.${router}-hsts.headers.stsSeconds=${HSTS_SECONDS}"`,
+  ]
+}
+
 function labelLines(app) {
   const id = app.id
   const port = app.runtime?.port || 80
@@ -76,6 +88,7 @@ function labelLines(app) {
     `      - "traefik.http.routers.${id}.entrypoints=websecure"`,
     `      - "traefik.http.routers.${id}.tls=true"`,
     `      - "traefik.http.routers.${id}.tls.certresolver=le"`,
+    ...hstsLabels(id),
     `      - "traefik.http.services.${id}.loadbalancer.server.port=${port}"`,
     `      - "deploy.app=${id}"`,
     `      - "deploy.image=${app.image || ''}"`,
@@ -131,6 +144,7 @@ function mediaServiceLines(app) {
       `      - "traefik.http.routers.${slug}.entrypoints=websecure"`,
       `      - "traefik.http.routers.${slug}.tls=true"`,
       `      - "traefik.http.routers.${slug}.tls.certresolver=le"`,
+      ...hstsLabels(slug),
       `      - "traefik.http.routers.${slug}.priority=200"`,
       `      - "traefik.http.services.${slug}.loadbalancer.server.port=80"`,
     )
