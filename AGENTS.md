@@ -11,6 +11,7 @@
 ## 项目结构
 - `web/` 前端（Vite + React），dev 端口 5180，`/api` 代理到 `127.0.0.1:8787`
 - `server/` 后端（Express + ssh2），端口 8787；数据存 `server/data/`（gitignore，凭据 AES-256-GCM 加密）
+- 后端默认只监听 `127.0.0.1:8787`，可用 `HOST` 环境变量覆盖（如 `HOST=0.0.0.0` 开放局域网，会在启动时打印警告）；本程序没有登录鉴权，端口可达即等于拿到全部已纳管服务器的操作权，远程访问请走 SSH 隧道或 Tailscale，不要用同机反代（反代会把来源变成 127.0.0.1，让 `requireLocal` 形同失效）
 - `.temp/design.html` UI 设计稿（玻璃拟态），实现需复用其 tokens 与布局（已落地为 `web/src/styles.css`）
 - SSH 密钥连接：添加服务器勾选「密钥连接」后，首次用密码登录并安装 ed25519 公钥（生成必须用 `ssh2.utils.generateKeyPairSync`，Node crypto 的 PKCS8 ed25519 私钥 ssh2 解析不了），之后仅用密钥连接，密码不落盘
 - 脚本运维：`server/scripts.js` + `web/src/pages/ScriptsPage.tsx`。脚本内容与固定环境变量整体加密存 `server/data/scripts.json`；配置时只保存「默认服务器」，执行用户默认取本次所选服务器的 SSH 用户，运行时可在运行弹窗改选其他服务器（执行身份随之切换），也可选用 sudo 提权（要求免密 sudo，`sudo -n`）。运行时把 `export` 语句和脚本一起通过 stdin 交给远端 `bash -s`（不落盘、不进 ps）。支持预声明「运行参数」（文本/开关），运行时填写后作为临时环境变量注入，值不落库、不进日志；脚本相关接口只允许本机访问

@@ -29,6 +29,11 @@ import {
 import { saveUploadStream } from './uploads.js'
 
 const PORT = Number(process.env.PORT) || 8787
+// 默认只监听回环地址：本程序没有登录鉴权，能连上它就能操作所有已纳管的服务器，
+// 且脚本、APP 环境变量等接口只信任本机来源。需要局域网访问时显式设 HOST，
+// 并自行确认网络边界（更推荐 SSH 隧道或 Tailscale 这类受控通道）。
+const HOST = String(process.env.HOST || '').trim() || '127.0.0.1'
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost'])
 const now = () => new Date().toISOString()
 
 const app = express()
@@ -643,7 +648,17 @@ if (fs.existsSync(distDir)) {
   })
 }
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, HOST, () => {
   markInterrupted()
-  console.log(`[ourjia-paas] server listening on http://127.0.0.1:${PORT}`)
+  // 打印真实绑定地址，避免把「监听 0.0.0.0」误读成「只有本机能访问」
+  const addr = server.address()
+  const shown =
+    addr && typeof addr === 'object'
+      ? `${addr.family === 'IPv6' ? `[${addr.address}]` : addr.address}:${addr.port}`
+      : `${HOST}:${PORT}`
+  console.log(`[ourjia-paas] server listening on http://${shown}`)
+  if (!LOOPBACK_HOSTS.has(HOST)) {
+    console.warn(`[ourjia-paas] 警告：监听在非回环地址 ${HOST}，本程序没有登录鉴权，任何能访问该端口的人都能操作全部已纳管服务器`)
+    console.warn('[ourjia-paas] 脚本管理、APP 环境变量等接口仍只接受本机来源，远程使用这些功能请改走 SSH 隧道或 Tailscale')
+  }
 })
