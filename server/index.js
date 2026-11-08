@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { encrypt, decrypt, getServers, saveServers, findServer, publicServer } from './store.js'
 import { connectSSH, probeServer, generateKeyPair, installPublicKey, execScript } from './ssh.js'
-import { defaultConfig, normalizeConfig, resolveTraefikImage } from './config.js'
+import { defaultConfig, normalizeConfig, resolveTraefikImage, configHash } from './config.js'
 import { collectFacts, buildCheckReport, probeRegistryMirrors, probePublicPorts } from './check.js'
 import { createJob, getJob, snapshot, subscribe, acquireLock, releaseLock, jobLocked, markInterrupted } from './jobs.js'
 import { runInit, planSteps } from './init.js'
@@ -27,6 +27,7 @@ import {
   saveScripts,
 } from './scripts.js'
 import { saveUploadStream } from './uploads.js'
+import { buildBackup, previewImport, applyImport } from './appbackup.js'
 
 const PORT = Number(process.env.PORT) || 8787
 // 默认只监听回环地址：本程序没有登录鉴权，能连上它就能操作所有已纳管的服务器，
@@ -37,7 +38,8 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost'])
 const now = () => new Date().toISOString()
 
 const app = express()
-app.use(express.json())
+// 导入应用配置文件可能带大量环境变量，默认 100kb 不够用
+app.use(express.json({ limit: '2mb' }))
 
 function badRequest(message) {
   const err = new Error(message)
@@ -112,6 +114,19 @@ function reachTarget(facts, rec) {
 
 function serverConfig(rec) {
   return normalizeConfig(rec.config || {}, defaultConfig())
+}
+
+const INIT_MODES = new Set(['auto', 'init', 'apply', 'status'])
+
+// 任务创建时先给出一个步骤表；真正执行哪些步骤由服务器上的台账在运行时决定（setSteps 会替换）
+function initJobSteps(mode, rec, config) {
+  if (mode === 'status') return [{ id: 'status', title: '获取服务器状态（跳过初始化）' }]
+  if (mode === 'apply') return [{ id: 'preflight', title: '读取台账并检查变更' }]
+  if (mode === 'init') return planSteps(config)
+  // auto：已初始化的服务器只读，未初始化的才完整执行
+  const state = rec.init?.state
+  if (state === 'ready' || state === 'drifted') return [{ id: 'status', title: '获取服务器状态（跳过初始化）' }]
+  return planSteps(config)
 }
 
 app.get('/api/servers', wrap((_req, res) => {
@@ -294,20 +309,23 @@ app.post('/api/servers/:id/init', wrap(async (req, res) => {
   const running = jobLocked(rec.id)
   if (running) throw badRequest('该服务器已有进行中的任务')
 
+  const modeRaw = String(req.body?.mode || 'auto')
+  const mode = INIT_MODES.has(modeRaw) ? modeRaw : 'auto'
   const config = normalizeConfig(req.body?.config || rec.config || {}, defaultConfig())
   rec.config = config
   saveServers()
 
-  const job = createJob(rec.id, 'init', planSteps(config))
+  const job = createJob(rec.id, 'init', initJobSteps(mode, rec, config), mode)
   if (!acquireLock(rec.id, job.id)) throw badRequest('该服务器已有进行中的任务')
   res.json({ job: snapshot(job) })
 
   // 后台执行
   ;(async () => {
     let conn
+    let result = null
     try {
       conn = await connectSSH(serverCredentials(rec))
-      await runInit(job, conn, rec, config)
+      result = await runInit(job, conn, rec, config, mode)
     } catch (err) {
       const { setJobState, appendLog } = await import('./jobs.js')
       appendLog(job, `连接失败：${err.message}`, 'err')
@@ -315,11 +333,25 @@ app.post('/api/servers/:id/init', wrap(async (req, res) => {
     } finally {
       conn?.end()
       releaseLock(rec.id)
+      const prev = rec.init || {}
+      const hasRecord = Boolean(result?.record)
+      const upToDate = Boolean(result?.record && result.record.configHash === configHash(config))
+      const keepPrev = prev.state === 'ready' || prev.state === 'drifted'
       rec.init = {
-        state: job.status === 'done' ? 'ready' : 'uninitialized',
+        state:
+          job.status === 'done'
+            ? !hasRecord
+              ? 'uninitialized'
+              : upToDate
+                ? 'ready'
+                : 'drifted'
+            : keepPrev
+              ? prev.state
+              : 'uninitialized',
         lastCheckAt: now(),
-        lastInitAt: job.status === 'done' ? now() : rec.init?.lastInitAt || null,
-        summary: rec.init?.summary || null,
+        // 只读状态任务不会改写台账，保留上一次初始化完成时间
+        lastInitAt: result?.record?.finishedAt || prev.lastInitAt || null,
+        summary: prev.summary || null,
         error: job.status === 'failed' ? job.error : null,
       }
       saveServers()
@@ -340,6 +372,33 @@ app.post('/api/apps', wrap((req, res) => {
   if (!server) throw badRequest('服务器不存在')
   const rec = createApp({ ...req.body, serverId: server.id })
   res.json({ app: publicApp(rec) })
+}))
+
+// 应用配置备份：导出带环境变量明文，只允许本机操作
+app.get('/api/apps/export', wrap((req, res) => {
+  requireLocal(req)
+  const backup = buildBackup()
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="ourjia-paas-apps-${new Date().toISOString().slice(0, 10)}.json"`,
+  )
+  res.json(backup)
+}))
+
+// 从备份文件恢复应用：dryRun=true 只做校验并返回逐条预览
+app.post('/api/apps/import', wrap((req, res) => {
+  requireLocal(req)
+  const data = req.body?.data
+  if (req.body?.dryRun === true) {
+    res.json({ preview: previewImport(data) })
+    return
+  }
+  const result = applyImport(data)
+  res.json({
+    imported: result.imported.map(publicApp),
+    skipped: result.skipped,
+    failed: result.failed,
+  })
 }))
 
 app.get('/api/apps/:id/env', wrap((req, res) => {

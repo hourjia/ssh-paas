@@ -1,7 +1,7 @@
 import { execScript, sftpWrite } from './ssh.js'
 import { configHash, resolveSwapMb, resolveTraefikImage } from './config.js'
 import { collectFacts, probeRegistryMirrors } from './check.js'
-import { appendLog, updateStep, setJobState } from './jobs.js'
+import { appendLog, updateStep, setJobState, setSteps } from './jobs.js'
 import { StepError, runStep, echoScript, forward, flushCarry, tailOf } from './step-runner.js'
 
 const INIT_DIR = '/srv/.ourjia'
@@ -77,30 +77,419 @@ export function planSteps(config) {
   return steps
 }
 
-export async function runInit(job, conn, server, config) {
+const TZ_TARGET = 'Asia/Shanghai'
+
+// 台账解析：collect.sh 把 /srv/.ourjia/init.json 压成一行回传
+function parseRecord(facts) {
+  if (facts.INIT_RECORD !== 'yes' || !facts.INIT_RECORD_BODY) return null
+  try {
+    const parsed = JSON.parse(facts.INIT_RECORD_BODY)
+    return parsed && typeof parsed === 'object' ? parsed : { unparsable: true }
+  } catch {
+    return { unparsable: true }
+  }
+}
+
+const splitList = (raw) =>
+  String(raw || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+const sameSet = (a, b) => {
+  const left = [...new Set(a)].sort()
+  const right = [...new Set(b)].sort()
+  return left.length === right.length && left.every((v, i) => v === right[i])
+}
+
+const stripSlash = (s) => String(s).replace(/\/+$/, '')
+
+const STEP_ORDER = ['system', 'docker', 'docker-config', 'skeleton', 'traefik']
+const STEP_TITLES = {
+  system: '基础工具与系统调优（git/curl、时区/NTP、swap）',
+  docker: '安装 Docker / Compose / Buildx',
+  'docker-config': '配置 Docker（daemon.json）',
+  skeleton: '创建目录骨架与网络',
+  traefik: '部署 Traefik',
+}
+
+// 已初始化的服务器：对比台账与实际状态，算出真正需要执行的步骤，其余步骤全部跳过。
+// 判断以服务器事实为主，因此「配置没变但服务停了」也能被修复。
+export function planChanges(config, record, facts) {
+  const prev =
+    record && !record.unparsable && record.config && typeof record.config === 'object'
+      ? record.config
+      : null
+  const reasons = {}
+  const need = (id, reason) => {
+    reasons[id] ??= []
+    if (!reasons[id].includes(reason)) reasons[id].push(reason)
+  }
+
+  const memTotal = Number(facts.MEM_TOTAL_MB) || 0
+  const targetSwap = resolveSwapMb(config, memTotal)
+
+  // 系统：基础工具、时区、NTP、swap、swappiness
+  if (facts.TOOL_GIT !== 'yes' || facts.TOOL_CURL !== 'yes') need('system', '缺少 git / curl')
+  if (facts.TZ !== TZ_TARGET) need('system', `时区 ${facts.TZ || '未设置'} → ${TZ_TARGET}`)
+  if (facts.TZ_SYNC !== 'yes') need('system', 'NTP 未同步')
+  if (Number(facts.SWAPPINESS) !== config.swappiness) {
+    need('system', `vm.swappiness ${facts.SWAPPINESS ?? '未知'} → ${config.swappiness}`)
+  }
+  if (targetSwap > 0 && (Number(facts.SWAP_TOTAL_MB) || 0) + 32 < targetSwap) {
+    // 允许几十 MB 的误差：swapfile 的记账开销会让 2048MB 显示成 2047MB
+    need('system', `swap ${Number(facts.SWAP_TOTAL_MB) || 0}MB < 目标 ${targetSwap}MB`)
+  }
+
+  // Docker 本体
+  if (!facts.DOCKER_VERSION) need('docker', '未安装 Docker')
+  else if (!facts.COMPOSE_VERSION) need('docker', '缺少 docker compose')
+  else if (facts.DOCKER_RUNNING !== 'yes') need('docker', 'Docker 未运行')
+
+  // daemon.json：只比较显式配置项，auto 项不自动改写，避免反复重启 Docker
+  if (facts.DAEMON_JSON_PRESENT !== 'yes') {
+    need('docker-config', '缺少 /etc/docker/daemon.json')
+  } else {
+    const appliedMirrors = splitList(facts.DAEMON_JSON_MIRRORS).map(stripSlash)
+    const desiredMirrors = config.dockerHubMirrors.map((m) => `https://${stripSlash(m)}`)
+    if (!sameSet(appliedMirrors, desiredMirrors)) {
+      need('docker-config', `镜像加速 → ${desiredMirrors.join('、') || '未设置'}`)
+    }
+    const desiredDns = config.advanced.containerDns
+    if (desiredDns && desiredDns.length && !sameSet(splitList(facts.DAEMON_JSON_DNS), desiredDns)) {
+      need('docker-config', `容器 DNS → ${desiredDns.join('、')}`)
+    }
+    const desiredPool = config.advanced.dockerAddressPool
+    if (desiredPool && !splitList(facts.DAEMON_JSON_POOLS).includes(desiredPool)) {
+      need('docker-config', `地址池 → ${desiredPool}`)
+    }
+  }
+
+  // 目录骨架与网络
+  const missingDirs = ['/srv/apps', '/srv/shared', '/srv/traefik', '/srv/data'].filter(
+    (dir) => facts[`DIR_${dir.replace(/\//g, '_')}`] !== 'yes',
+  )
+  if (missingDirs.length) need('skeleton', `缺少目录 ${missingDirs.join('、')}`)
+  const networks = splitList(facts.NET_NAMES)
+  const missingNets = ['proxy-net', 'shared-net'].filter((n) => !networks.includes(n))
+  if (missingNets.length) need('skeleton', `缺少网络 ${missingNets.join('、')}`)
+
+  // Traefik
+  const image = resolveTraefikImage(config)
+  const [traefikState, traefikHealth] = String(facts.TRAEFIK_STATE || '').split('|')
+  if (!traefikState) need('traefik', '未部署 Traefik')
+  else if (traefikState !== 'running') need('traefik', `Traefik 状态 ${traefikState}`)
+  else if (traefikHealth === 'unhealthy') need('traefik', 'Traefik 健康检查失败')
+  if (facts.TRAEFIK_IMAGE && facts.TRAEFIK_IMAGE !== image) {
+    need('traefik', `镜像 ${facts.TRAEFIK_IMAGE} → ${image}`)
+  }
+  const acmeOn = config.acme.ca !== 'none'
+  const redirectOn = /redirections\.entrypoint\.to=websecure/.test(String(facts.TRAEFIK_CMD || ''))
+  if (acmeOn !== redirectOn) {
+    need('traefik', acmeOn ? '缺少 HTTP → HTTPS 跳转' : '仍配置了 HTTP → HTTPS 跳转')
+  }
+  if (prev) {
+    if (String(prev.traefikVersion || '') !== config.traefikVersion) {
+      need('traefik', `Traefik 版本 ${prev.traefikVersion || '未知'} → ${config.traefikVersion}`)
+    }
+    if (String(prev.acme?.ca || '') !== config.acme.ca || String(prev.acme?.email || '') !== config.acme.email) {
+      need('traefik', 'ACME 配置变更')
+    }
+  }
+
+  const steps = STEP_ORDER.filter((id) => reasons[id]).map((id) => ({ id, title: STEP_TITLES[id] }))
+  return { steps, reasons }
+}
+
+function formatUptime(raw) {
+  const seconds = Number(raw) || 0
+  if (!seconds) return '未知'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days) return `${days} 天 ${hours} 小时`
+  if (hours) return `${hours} 小时 ${minutes} 分钟`
+  return `${minutes} 分钟`
+}
+
+// 只读状态报告：已初始化服务器的「初始化」入口只做这件事
+function logStatusReport(job, facts, record, config) {
+  const memTotal = Number(facts.MEM_TOTAL_MB) || 0
+  const memAvail = Number(facts.MEM_AVAIL_MB) || 0
+  const diskGb = (Number(facts.DISK_AVAIL_KB) || 0) / 1024 / 1024
+  const swapMb = Number(facts.SWAP_TOTAL_MB) || 0
+  const containers = String(facts.CONTAINERS_ALL || '')
+    .split(';')
+    .filter(Boolean).length
+  const [traefikState, traefikHealth] = String(facts.TRAEFIK_STATE || '').split('|')
+
+  appendLog(job, '服务器状态（只读，不会修改任何配置）', 'note')
+  appendLog(job, `  系统：${facts.OS_PRETTY || '未知'} · ${facts.KERNEL || ''} · ${facts.ARCH || ''}`, 'note')
+  appendLog(job, `  运行：${formatUptime(facts.UPTIME_SEC)} · 内存 ${memTotal}MB（可用 ${memAvail}MB） · 磁盘剩余 ${diskGb.toFixed(1)}GB · swap ${swapMb}MB`, 'note')
+  appendLog(job, `  Docker：${facts.DOCKER_VERSION || '未安装'}${facts.COMPOSE_VERSION ? ` · Compose ${facts.COMPOSE_VERSION}` : ''}${facts.DOCKER_RUNNING === 'yes' ? ' · 运行中' : ' · 未运行'}`, 'note')
+  appendLog(job, `  Traefik：${traefikState ? `${traefikState}${traefikHealth && traefikHealth !== 'none' ? ` / ${traefikHealth}` : ''} · ${facts.TRAEFIK_IMAGE || '镜像未知'}` : '未部署'}`, 'note')
+  appendLog(job, `  网络：${facts.NET_PROXY || 'proxy-net 缺失'} · ${facts.NET_SHARED || 'shared-net 缺失'}`, 'note')
+  appendLog(job, `  容器：${containers} 个`, 'note')
+
+  if (!record) {
+    appendLog(job, '  台账：缺失，说明这台服务器尚未初始化；可在确认弹窗中执行完整初始化。', 'note')
+    return
+  }
+  if (record.unparsable) {
+    appendLog(job, '  台账：文件存在但无法解析，如需修复可执行「应用配置变更」。', 'note')
+    return
+  }
+  const upToDate = record.configHash === configHash(config)
+  appendLog(job, `  台账：完成于 ${record.finishedAt || '未知'}（配置指纹 ${record.configHash || '未知'}）`, 'note')
+  appendLog(
+    job,
+    upToDate
+      ? '  配置：与台账一致，无需重新初始化，所有步骤已跳过。'
+      : '  配置：与台账不一致（本次不修改服务器；如需应用，请点击「应用配置变更」，只会执行受影响的步骤）。',
+    'note',
+  )
+}
+
+async function runDockerConfigStep(job, conn, config, facts) {
+  // 先校验再原子替换，配置没变就不写、不重启
+  updateStep(job, 'docker-config', { status: 'running', startedAt: new Date().toISOString() })
+  job.currentStep = 'docker-config'
+  appendLog(job, '$ 读取并合并 /etc/docker/daemon.json', 'cmd')
+  const existingRaw = await execScript(conn, 'cat /etc/docker/daemon.json 2>/dev/null || true', { timeoutMs: 15000 })
+  const existingText = String(existingRaw.stdout || '').trim()
+  let existing = {}
+  if (existingText) {
+    const parsed = safeJsonParse(existingText, undefined)
+    if (parsed === undefined) {
+      throw new StepError(
+        '/etc/docker/daemon.json 不是合法 JSON，初始化已停止',
+        '为避免覆盖你现有的配置，未写入任何内容。请先修复或备份后移走该文件，再重试。',
+      )
+    }
+    existing = parsed && typeof parsed === 'object' ? parsed : {}
+  }
+  const desired = buildDaemonJson(existing, config, autoContainerDns(facts), pickAddressPool(facts))
+  const daemonText = JSON.stringify(desired, null, 2) + '\n'
+  const daemonUnchanged = existingText !== '' && JSON.stringify(existing) === JSON.stringify(desired)
+
+  if (daemonUnchanged) {
+    appendLog(job, 'daemon.json 已符合期望配置，跳过写入与 Docker 重启', 'note')
+    updateStep(job, 'docker-config', { status: 'done', finishedAt: new Date().toISOString() })
+    return
+  }
+
+  const backupScript = [
+    `mkdir -p /etc/docker`,
+    `if [ -f ${DAEMON_JSON} ]; then cp ${DAEMON_JSON} ${DAEMON_JSON}.bak.$(date +%s); fi`,
+  ].join('\n')
+  echoScript(job, '备份现有 daemon.json', backupScript)
+  await execScript(conn, backupScript, { timeoutMs: 15000 })
+
+  await sftpWrite(conn, `${DAEMON_JSON}.ourjia.tmp`, daemonText, 0o644)
+
+  const validateScript = [
+    `TMP=${DAEMON_JSON}.ourjia.tmp`,
+    'if command -v dockerd >/dev/null 2>&1; then',
+    '  if dockerd --validate --config-file="$TMP" >/tmp/ourjia-dockerd-validate.log 2>&1; then',
+    '    echo "daemon.json 校验通过"',
+    '  elif grep -q "flag provided but not defined" /tmp/ourjia-dockerd-validate.log; then',
+    '    echo "当前 dockerd 不支持 --validate，跳过校验"',
+    '  else',
+    '    echo "daemon.json 校验失败："',
+    '    cat /tmp/ourjia-dockerd-validate.log',
+    '    exit 1',
+    '  fi',
+    'fi',
+  ].join('\n')
+  echoScript(job, '校验 daemon.json（dockerd --validate）', validateScript)
+  const validate = await execScript(conn, validateScript, {
+    timeoutMs: 30000,
+    onStdout: (t) => forward(job, t, 'out'),
+    onStderr: (t) => forward(job, t, 'err'),
+  })
+  if (validate.code !== 0) {
+    await execScript(conn, `rm -f ${DAEMON_JSON}.ourjia.tmp`, { timeoutMs: 10000 })
+    throw new StepError('daemon.json 校验失败，已保留原配置', tailOf(validate.stdout || validate.stderr))
+  }
+
+  await execScript(conn, `mv -f ${DAEMON_JSON}.ourjia.tmp ${DAEMON_JSON} && chmod 644 ${DAEMON_JSON}`, {
+    timeoutMs: 15000,
+  })
+  appendLog(job, `$ cat ${DAEMON_JSON}`, 'cmd')
+  for (const line of daemonText.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
+  appendLog(job, 'daemon.json 已写入（原文件已备份为 daemon.json.bak.<时间戳>）', 'note')
+
+  const reloadScript = [
+    'systemctl enable docker',
+    'systemctl restart docker',
+    'for i in $(seq 1 30); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done',
+    'exit 1',
+  ].join('\n')
+  echoScript(job, '重启 Docker 使配置生效', reloadScript)
+  const reload = await execScript(conn, `set -e\n${reloadScript}\n`, {
+    timeoutMs: 120000,
+    onStdout: (t) => forward(job, t, 'out'),
+    onStderr: (t) => forward(job, t, 'err'),
+  })
+  if (reload.code !== 0) {
+    appendLog(job, 'Docker 未能使用新配置启动，回滚 daemon.json…', 'err')
+    const rollbackScript = [
+      `LATEST=$(ls -t ${DAEMON_JSON}.bak.* 2>/dev/null | head -1)`,
+      `if [ -n "$LATEST" ]; then cp "$LATEST" ${DAEMON_JSON}; else rm -f ${DAEMON_JSON}; fi`,
+      'systemctl restart docker',
+      'for i in $(seq 1 30); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done',
+      'exit 1',
+    ].join('\n')
+    echoScript(job, '回滚 daemon.json 并重启 Docker', rollbackScript)
+    const rollback = await execScript(conn, rollbackScript, {
+      timeoutMs: 120000,
+      onStdout: (t) => forward(job, t, 'out'),
+      onStderr: (t) => forward(job, t, 'err'),
+    })
+    throw new StepError(
+      'Docker 重启后无法就绪，已回滚 daemon.json',
+      rollback.code === 0
+        ? '已恢复到上一份 daemon.json。请检查镜像加速地址或地址池是否可用后重试。'
+        : tailOf(reload.stderr || reload.stdout),
+    )
+  }
+  appendLog(job, 'Docker 已重启并应用新配置', 'note')
+  // 备份只保留最近 5 份
+  await execScript(conn, `ls -t ${DAEMON_JSON}.bak.* 2>/dev/null | tail -n +6 | xargs -r rm -f`, {
+    timeoutMs: 10000,
+  })
+  updateStep(job, 'docker-config', { status: 'done', finishedAt: new Date().toISOString() })
+  flushCarry(job)
+}
+
+async function runTraefikStep(job, conn, config, server) {
+  // 先用 SFTP 落地配置文件，再执行部署脚本
+  const image = resolveTraefikImage(config)
+  const composeYaml = buildTraefikCompose(config)
+  const envFile = buildTraefikEnv(config, server.id)
+  appendLog(job, '$ mkdir -p /srv/traefik/logs && chmod 700 /srv/traefik', 'cmd')
+  await execScript(conn, 'mkdir -p /srv/traefik/logs && chmod 700 /srv/traefik', { timeoutMs: 15000 })
+
+  // 宿主机上的 access.log 不受 daemon.json 的容器日志限制，需要单独的 logrotate
+  const logrotateConf = [
+    '/srv/traefik/logs/*.log {',
+    '  daily',
+    '  rotate 14',
+    '  missingok',
+    '  notifempty',
+    '  compress',
+    '  delaycompress',
+    '  copytruncate',
+    '}',
+    '',
+  ].join('\n')
+  appendLog(job, '$ cat /etc/logrotate.d/traefik', 'cmd')
+  for (const line of logrotateConf.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
+  await execScript(conn, 'mkdir -p /etc/logrotate.d', { timeoutMs: 15000 })
+  await sftpWrite(conn, '/etc/logrotate.d/traefik', logrotateConf, 0o644)
+  appendLog(job, '已写入 Traefik 访问日志轮转配置（每日，保留 14 份，copytruncate）', 'note')
+
+  await sftpWrite(conn, '/srv/traefik/docker-compose.yml', composeYaml, 0o644)
+  await sftpWrite(conn, '/srv/traefik/.env', envFile, 0o600)
+  appendLog(job, '$ cat /srv/traefik/docker-compose.yml', 'cmd')
+  for (const line of composeYaml.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
+  appendLog(job, '$ cat /srv/traefik/.env', 'cmd')
+  for (const line of envFile.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
+  const traefikScript = buildTraefikScript(config, image)
+  await runStep(job, conn, 'traefik', traefikScript, 900000, '拉取镜像并启动 Traefik')
+  flushCarry(job)
+}
+
+// mode: init=完整初始化 apply=只执行受影响的步骤 status=只读状态 auto=按台账自动判断（默认）
+export async function runInit(job, conn, server, config, mode = 'auto') {
   setJobState(job, 'running')
   try {
-    // 1. 预检：重新采集事实并实测镜像源
-    updateStep(job, 'preflight', { status: 'running', startedAt: new Date().toISOString() })
-    job.currentStep = 'preflight'
-    appendLog(job, '采集服务器事实…', 'note')
+    // 1. 先采集事实并读台账：这一步对所有模式都是只读的
+    const probeStepId = job.steps[0]?.id || 'status'
+    job.currentStep = probeStepId
+    updateStep(job, probeStepId, { status: 'running', startedAt: new Date().toISOString() })
+    appendLog(job, '采集服务器事实并读取初始化台账…', 'note')
     const facts = await collectFacts(conn)
     const memTotal = Number(facts.MEM_TOTAL_MB) || 0
     appendLog(job, `系统 ${facts.OS_PRETTY || '?'} · ${facts.ARCH} · 内存 ${memTotal}MB`, 'note')
 
+    const record = parseRecord(facts)
+    const effectiveMode =
+      mode === 'status'
+        ? 'status'
+        : mode === 'init'
+          ? 'init'
+          : mode === 'apply'
+            ? record
+              ? 'apply'
+              : 'init'
+            : // auto：服务器上已有台账就只读，没台账才完整初始化
+              record
+              ? 'status'
+              : 'init'
+    job.mode = effectiveMode
+
+    // 已初始化：只获取状态，不执行任何步骤
+    if (effectiveMode === 'status') {
+      setSteps(job, [{ id: 'status', title: '获取服务器状态（已初始化，跳过全部初始化步骤）' }])
+      job.currentStep = 'status'
+      updateStep(job, 'status', { status: 'running', startedAt: new Date().toISOString() })
+      logStatusReport(job, facts, record, config)
+      updateStep(job, 'status', { status: 'done', finishedAt: new Date().toISOString() })
+      appendLog(job, '只读检查完成：未修改服务器上的任何配置。', 'note')
+      setJobState(job, 'done')
+      return { ok: true, mode: 'status', record }
+    }
+
+    // 2. 规划步骤：完整初始化，或只执行受影响的步骤
+    let steps
+    let reasons = {}
+    if (effectiveMode === 'init') {
+      steps = planSteps(config)
+    } else {
+      const plan = planChanges(config, record, facts)
+      reasons = plan.reasons
+      steps = [
+        { id: 'preflight', title: '读取台账并检查服务器状态' },
+        ...plan.steps,
+        { id: 'record', title: '更新初始化台账' },
+      ]
+      if (record?.unparsable) {
+        appendLog(job, '台账存在但无法解析，按服务器实际状态补齐。', 'note')
+      } else {
+        appendLog(job, `台账完成于 ${record?.finishedAt || '未知'}，未变更的步骤全部跳过。`, 'note')
+      }
+      if (plan.steps.length) {
+        appendLog(job, `本次需要执行 ${plan.steps.length} 个步骤：`, 'note')
+        for (const step of plan.steps) appendLog(job, `• ${step.title} —— ${reasons[step.id].join('；')}`, 'note')
+        const skipped = STEP_ORDER.filter((id) => !reasons[id])
+        if (skipped.length) appendLog(job, `跳过：${skipped.map((id) => STEP_TITLES[id]).join('、')}`, 'note')
+      } else {
+        appendLog(job, '服务器状态与配置一致，没有需要执行的变更步骤，仅更新台账。', 'note')
+      }
+    }
+    setSteps(job, steps)
+    const willRun = new Set(steps.map((s) => s.id))
+    job.currentStep = 'preflight'
+    updateStep(job, 'preflight', { status: 'running', startedAt: new Date().toISOString() })
+
+    // 3. 只读前置校验：权限、端口、镜像源
     const uid = Number(facts.UID)
     if (uid !== 0 && facts.SUDO !== 'yes') {
       throw new StepError('需要 root 或免密 sudo 才能初始化', '当前用户权限不足')
     }
-    // 端口冲突检查：Traefik 自身占用的 80/443 不算冲突（支持重复执行）
     const traefikOwnsPorts =
       /traefik|docker-proxy/.test(String(facts.PORT80_PROC || '')) &&
       String(facts.TRAEFIK_STATE || '').startsWith('running')
-    for (const port of ['PORT80', 'PORT443']) {
-      if (facts[port] && !traefikOwnsPorts) {
-        const label = port === 'PORT80' ? '80' : '443'
-        throw new StepError(`${label} 端口已被其他进程占用，无法部署 Traefik`,
-          facts.PORT80_PROC || facts[port])
+    if (willRun.has('traefik')) {
+      for (const port of ['PORT80', 'PORT443']) {
+        if (facts[port] && !traefikOwnsPorts) {
+          const label = port === 'PORT80' ? '80' : '443'
+          throw new StepError(
+            `${label} 端口已被其他进程占用，无法部署 Traefik`,
+            facts.PORT80_PROC || facts[port],
+          )
+        }
       }
     }
 
@@ -108,10 +497,9 @@ export async function runInit(job, conn, server, config) {
     if (config.acme.ca !== 'none' && !String(config.acme.email || '').trim()) {
       appendLog(job, '⚠ 已启用 ACME 但未填写邮箱：证书仍可申请，但收不到到期提醒、账户无法找回；可在「配置」中补充。', 'note')
     }
-    let mirrorProbes = []
-    if (config.dockerHubMirrors.length) {
+    if (willRun.has('traefik') && config.dockerHubMirrors.length) {
       appendLog(job, `实测镜像加速器（目标镜像 ${image}）…`, 'note')
-      mirrorProbes = await probeRegistryMirrors(conn, config.dockerHubMirrors, image)
+      const mirrorProbes = await probeRegistryMirrors(conn, config.dockerHubMirrors, image)
       for (const p of mirrorProbes) {
         appendLog(job, `  ${p.mirror}: ${p.status === 'ok' ? '可用' : `不可用 - ${p.detail}`}`, p.status === 'ok' ? 'note' : 'err')
       }
@@ -122,170 +510,38 @@ export async function runInit(job, conn, server, config) {
     updateStep(job, 'preflight', { status: 'done', finishedAt: new Date().toISOString() })
     flushCarry(job)
 
-    // 2. 基础工具 + 时区/NTP + 系统调优
+    // 4. 按计划执行：没有列进步骤表的一律不碰服务器
     const swapMb = resolveSwapMb(config, memTotal)
-    const systemScript = buildSystemScript(swapMb, config.swappiness)
-    await runStep(job, conn, 'system', systemScript, 300000, '安装基础工具、配置时区/NTP 与 swap')
-    flushCarry(job)
+    const pool = config.advanced.dockerAddressPool ?? pickAddressPool(facts)
 
-    // 3. Docker
-    const dockerScript = buildDockerScript(config)
-    await runStep(job, conn, 'docker', dockerScript, 900000, '安装 Docker / Compose / Buildx')
-    flushCarry(job)
-
-    // 写 daemon.json：先校验再原子替换，配置没变就不写、不重启
-    updateStep(job, 'docker-config', { status: 'running', startedAt: new Date().toISOString() })
-    job.currentStep = 'docker-config'
-    appendLog(job, '$ 读取并合并 /etc/docker/daemon.json', 'cmd')
-    const existingRaw = await execScript(conn, 'cat /etc/docker/daemon.json 2>/dev/null || true', { timeoutMs: 15000 })
-    const existingText = String(existingRaw.stdout || '').trim()
-    let existing = {}
-    if (existingText) {
-      const parsed = safeJsonParse(existingText, undefined)
-      if (parsed === undefined) {
-        throw new StepError(
-          '/etc/docker/daemon.json 不是合法 JSON，初始化已停止',
-          '为避免覆盖你现有的配置，未写入任何内容。请先修复或备份后移走该文件，再重试。',
-        )
-      }
-      existing = parsed && typeof parsed === 'object' ? parsed : {}
-    }
-    const desired = buildDaemonJson(existing, config, autoContainerDns(facts), pickAddressPool(facts))
-    const daemonText = JSON.stringify(desired, null, 2) + '\n'
-    const daemonUnchanged = existingText !== '' && JSON.stringify(existing) === JSON.stringify(desired)
-
-    if (daemonUnchanged) {
-      appendLog(job, 'daemon.json 已符合期望配置，跳过写入与 Docker 重启', 'note')
-      updateStep(job, 'docker-config', { status: 'done', finishedAt: new Date().toISOString() })
-    } else {
-      const backupScript = [
-        `mkdir -p /etc/docker`,
-        `if [ -f ${DAEMON_JSON} ]; then cp ${DAEMON_JSON} ${DAEMON_JSON}.bak.$(date +%s); fi`,
-      ].join('\n')
-      echoScript(job, '备份现有 daemon.json', backupScript)
-      await execScript(conn, backupScript, { timeoutMs: 15000 })
-
-      await sftpWrite(conn, `${DAEMON_JSON}.ourjia.tmp`, daemonText, 0o644)
-
-      const validateScript = [
-        `TMP=${DAEMON_JSON}.ourjia.tmp`,
-        'if command -v dockerd >/dev/null 2>&1; then',
-        '  if dockerd --validate --config-file="$TMP" >/tmp/ourjia-dockerd-validate.log 2>&1; then',
-        '    echo "daemon.json 校验通过"',
-        '  elif grep -q "flag provided but not defined" /tmp/ourjia-dockerd-validate.log; then',
-        '    echo "当前 dockerd 不支持 --validate，跳过校验"',
-        '  else',
-        '    echo "daemon.json 校验失败："',
-        '    cat /tmp/ourjia-dockerd-validate.log',
-        '    exit 1',
-        '  fi',
-        'fi',
-      ].join('\n')
-      echoScript(job, '校验 daemon.json（dockerd --validate）', validateScript)
-      const validate = await execScript(conn, validateScript, {
-        timeoutMs: 30000,
-        onStdout: (t) => forward(job, t, 'out'),
-        onStderr: (t) => forward(job, t, 'err'),
-      })
-      if (validate.code !== 0) {
-        await execScript(conn, `rm -f ${DAEMON_JSON}.ourjia.tmp`, { timeoutMs: 10000 })
-        throw new StepError('daemon.json 校验失败，已保留原配置', tailOf(validate.stdout || validate.stderr))
-      }
-
-      await execScript(conn, `mv -f ${DAEMON_JSON}.ourjia.tmp ${DAEMON_JSON} && chmod 644 ${DAEMON_JSON}`, {
-        timeoutMs: 15000,
-      })
-      appendLog(job, `$ cat ${DAEMON_JSON}`, 'cmd')
-      for (const line of daemonText.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
-      appendLog(job, 'daemon.json 已写入（原文件已备份为 daemon.json.bak.<时间戳>）', 'note')
-
-      const reloadScript = [
-        'systemctl enable docker',
-        'systemctl restart docker',
-        'for i in $(seq 1 30); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done',
-        'exit 1',
-      ].join('\n')
-      echoScript(job, '重启 Docker 使配置生效', reloadScript)
-      const reload = await execScript(
-        conn,
-        `set -e\n${reloadScript}\n`,
-        { timeoutMs: 120000, onStdout: (t) => forward(job, t, 'out'), onStderr: (t) => forward(job, t, 'err') },
-      )
-      if (reload.code !== 0) {
-        appendLog(job, 'Docker 未能使用新配置启动，回滚 daemon.json…', 'err')
-        const rollbackScript = [
-          `LATEST=$(ls -t ${DAEMON_JSON}.bak.* 2>/dev/null | head -1)`,
-          `if [ -n "$LATEST" ]; then cp "$LATEST" ${DAEMON_JSON}; else rm -f ${DAEMON_JSON}; fi`,
-          'systemctl restart docker',
-          'for i in $(seq 1 30); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done',
-          'exit 1',
-        ].join('\n')
-        echoScript(job, '回滚 daemon.json 并重启 Docker', rollbackScript)
-        const rollback = await execScript(conn, rollbackScript, {
-          timeoutMs: 120000,
-          onStdout: (t) => forward(job, t, 'out'),
-          onStderr: (t) => forward(job, t, 'err'),
-        })
-        throw new StepError(
-          'Docker 重启后无法就绪，已回滚 daemon.json',
-          rollback.code === 0
-            ? '已恢复到上一份 daemon.json。请检查镜像加速地址或地址池是否可用后重试。'
-            : tailOf(reload.stderr || reload.stdout),
-        )
-      }
-      appendLog(job, 'Docker 已重启并应用新配置', 'note')
-      // 备份只保留最近 5 份
-      await execScript(conn, `ls -t ${DAEMON_JSON}.bak.* 2>/dev/null | tail -n +6 | xargs -r rm -f`, {
-        timeoutMs: 10000,
-      })
-      updateStep(job, 'docker-config', { status: 'done', finishedAt: new Date().toISOString() })
+    if (willRun.has('system')) {
+      const systemScript = buildSystemScript(swapMb, config.swappiness)
+      await runStep(job, conn, 'system', systemScript, 300000, '安装基础工具、配置时区/NTP 与 swap')
       flushCarry(job)
     }
 
-    // 4. 骨架
-    const pool = config.advanced.dockerAddressPool ?? pickAddressPool(facts)
-    const skeletonScript = buildSkeletonScript(pool)
-    await runStep(job, conn, 'skeleton', skeletonScript, 120000, '创建目录骨架与 Docker 网络')
-    flushCarry(job)
+    if (willRun.has('docker')) {
+      const dockerScript = buildDockerScript(config)
+      await runStep(job, conn, 'docker', dockerScript, 900000, '安装 Docker / Compose / Buildx')
+      flushCarry(job)
+    }
 
-    // 5. Traefik：先用 SFTP 落地配置文件，再执行部署脚本
-    const idBase = server.id
-    const composeYaml = buildTraefikCompose(config)
-    const envFile = buildTraefikEnv(config, idBase)
-    appendLog(job, '$ mkdir -p /srv/traefik/logs && chmod 700 /srv/traefik', 'cmd')
-    await execScript(conn, 'mkdir -p /srv/traefik/logs && chmod 700 /srv/traefik', { timeoutMs: 15000 })
+    if (willRun.has('docker-config')) {
+      await runDockerConfigStep(job, conn, config, facts)
+    }
 
-    // 宿主机上的 access.log 不受 daemon.json 的容器日志限制，需要单独的 logrotate
-    const logrotateConf = [
-      '/srv/traefik/logs/*.log {',
-      '  daily',
-      '  rotate 14',
-      '  missingok',
-      '  notifempty',
-      '  compress',
-      '  delaycompress',
-      '  copytruncate',
-      '}',
-      '',
-    ].join('\n')
-    appendLog(job, '$ cat /etc/logrotate.d/traefik', 'cmd')
-    for (const line of logrotateConf.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
-    await execScript(conn, 'mkdir -p /etc/logrotate.d', { timeoutMs: 15000 })
-    await sftpWrite(conn, '/etc/logrotate.d/traefik', logrotateConf, 0o644)
-    appendLog(job, '已写入 Traefik 访问日志轮转配置（每日，保留 14 份，copytruncate）', 'note')
+    if (willRun.has('skeleton')) {
+      const skeletonScript = buildSkeletonScript(pool)
+      await runStep(job, conn, 'skeleton', skeletonScript, 120000, '创建目录骨架与 Docker 网络')
+      flushCarry(job)
+    }
 
-    await sftpWrite(conn, '/srv/traefik/docker-compose.yml', composeYaml, 0o644)
-    await sftpWrite(conn, '/srv/traefik/.env', envFile, 0o600)
-    appendLog(job, '$ cat /srv/traefik/docker-compose.yml', 'cmd')
-    for (const line of composeYaml.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
-    appendLog(job, '$ cat /srv/traefik/.env', 'cmd')
-    for (const line of envFile.trimEnd().split('\n')) appendLog(job, `  ${line}`, 'out')
-    const traefikScript = buildTraefikScript(config, image)
-    await runStep(job, conn, 'traefik', traefikScript, 900000, '拉取镜像并启动 Traefik')
-    flushCarry(job)
+    if (willRun.has('traefik')) {
+      await runTraefikStep(job, conn, config, server)
+    }
 
-    // 6. 台账
-    const record = {
+    // 5. 台账
+    const nextRecord = {
       version: 1,
       serverId: server.id,
       configHash: configHash(config),
@@ -296,12 +552,12 @@ export async function runInit(job, conn, server, config) {
       addressPool: pool,
     }
     await execScript(conn, `mkdir -p ${INIT_DIR}`, { timeoutMs: 15000 })
-    await sftpWrite(conn, INIT_RECORD, JSON.stringify(record, null, 2) + '\n', 0o600)
+    await sftpWrite(conn, INIT_RECORD, JSON.stringify(nextRecord, null, 2) + '\n', 0o600)
     updateStep(job, 'record', { status: 'done', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() })
-    appendLog(job, `初始化台账已写入 ${INIT_RECORD}`, 'note')
+    appendLog(job, `${effectiveMode === 'apply' ? '台账已更新' : '初始化台账已写入'} ${INIT_RECORD}`, 'note')
 
     setJobState(job, 'done')
-    return { ok: true, record }
+    return { ok: true, mode: effectiveMode, record: nextRecord }
   } catch (err) {
     const stepId = job.currentStep
     const failedStepTitle = job.steps.find((s) => s.id === stepId)?.title
@@ -316,7 +572,7 @@ export async function runInit(job, conn, server, config) {
       }
     }
     appendLog(job, '', 'out')
-    appendLog(job, `✗ 初始化失败于「${failedStepTitle || '未知步骤'}」：${err.message}`, 'err')
+    appendLog(job, `✗ 执行失败于「${failedStepTitle || '未知步骤'}」：${err.message}`, 'err')
     if (err.detail) {
       appendLog(job, '错误输出：', 'err')
       for (const line of String(err.detail).split('\n')) appendLog(job, `  ${line}`, 'err')
@@ -327,7 +583,7 @@ export async function runInit(job, conn, server, config) {
     appendLog(job, '─'.repeat(60), 'note')
     for (const tip of troubleshootingTips(stepId, server, err)) appendLog(job, `• ${tip}`, 'note')
     appendLog(job, '• 可直接在服务器终端执行上面回显的命令，复现并手工处理该步骤。', 'note')
-    appendLog(job, '• 处理完成后回到本页再次点击「重新初始化」，已完成的步骤会跳过。', 'note')
+    appendLog(job, '• 处理完成后回到本页再次执行，已完成的步骤会跳过。', 'note')
     flushCarry(job)
     setJobState(job, 'failed', err.message)
     return { ok: false, error: err.message }

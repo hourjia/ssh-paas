@@ -99,6 +99,11 @@ function parseEnvInput(raw) {
   return out
 }
 
+// 供备份文件导入复用：解析并校验环境变量条目
+export function normalizeEnvEntries(raw) {
+  return parseEnvInput(raw)
+}
+
 // 环境变量可能含密钥，落盘前整体加密
 export function readEnvEntries(app) {
   if (!app?.envEnc) return []
@@ -282,6 +287,121 @@ export function deleteApp(id) {
   if (idx === -1) throw bad('应用不存在')
   list.splice(idx, 1)
   saveApps()
+}
+
+// 由备份文件恢复应用：按创建应用同样的规则校验，但允许沿用原 ID 与部署记录
+export function buildAppRecord(input = {}) {
+  const list = load()
+  const id = String(input.id || '')
+  if (!/^app_[A-Za-z0-9]{6,32}$/.test(id)) throw bad('应用 ID 不合法')
+  if (list.some((a) => a.id === id)) throw bad(`应用 ${id} 已存在`)
+
+  const kind = input.kind === 'service' ? 'service' : 'image'
+  const name = String(input.name || '').trim()
+  if (!name) throw bad('应用名称不能为空')
+  if (name.length > NAME_MAX) throw bad(`应用名称不能超过 ${NAME_MAX} 个字符`)
+  const image = String(input.image || '').trim()
+  if (!image) throw bad('Docker 镜像地址不能为空')
+  if (!IMAGE_RE.test(image)) throw bad(`镜像地址格式不合法：${image}`)
+
+  const port = Number(input.runtime?.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw bad('端口需为 1-65535')
+
+  const serverId = String(input.serverId || '').trim()
+  if (!serverId) throw bad('请选择服务器')
+
+  let domain = null
+  if (kind === 'image') {
+    domain = String(input.domain || '').trim().toLowerCase()
+    if (!DOMAIN_RE.test(domain)) throw bad('域名格式不合法')
+    if (list.some((a) => a.serverId === serverId && a.domain === domain)) {
+      throw bad(`该服务器上已有应用使用域名 ${domain}`)
+    }
+  }
+
+  let service = null
+  if (kind === 'service') {
+    const raw = input.service || {}
+    const alias = String(raw.alias || '').trim().toLowerCase()
+    if (alias && !ALIAS_RE.test(alias)) throw bad('网络别名只能包含小写字母、数字和短横线')
+    if (alias && list.some((a) => a.serverId === serverId && a.service?.alias === alias)) {
+      throw bad(`网络别名 ${alias} 已被其他应用占用`)
+    }
+    const healthCmd = String(raw.healthCmd || '').trim()
+    if (/[\r\n]/.test(healthCmd)) throw bad('健康检查命令不能包含换行')
+    service = {
+      alias: alias || null,
+      dataDir: normalizeDataDir(raw.dataDir) || `/srv/data/${id}`,
+      containerPath: normalizeContainerPath(raw.containerPath),
+      dataOwner: raw.dataOwner && OWNER_RE.test(String(raw.dataOwner)) ? String(raw.dataOwner) : null,
+      healthCmd: healthCmd.slice(0, 200) || null,
+    }
+  }
+
+  let volumes = []
+  if (kind === 'image') {
+    const items = Array.isArray(input.volumes) ? input.volumes : []
+    if (items.length > 5) throw bad('数据卷最多 5 个')
+    const names = new Set()
+    volumes = items.map((item) => {
+      const name = String(item?.name || '').toLowerCase()
+      if (!/^[a-z0-9][a-z0-9-]{0,19}$/.test(name)) throw bad('数据卷名称不合法')
+      if (names.has(name)) throw bad(`数据卷名称重复：${name}`)
+      names.add(name)
+      const mountPath = normalizeContainerPath(item?.mountPath)
+      const hostPath = String(item?.hostPath || '')
+      if (!hostPath.startsWith('/') || hostPath.includes('..') || /\s/.test(hostPath)) {
+        throw bad('数据卷宿主机路径不合法')
+      }
+      const serveUrl = String(item?.serveUrl || '').trim()
+      if (serveUrl && (!/^\/[A-Za-z0-9._/-]*\/$/.test(serveUrl) || serveUrl.includes('..'))) {
+        throw bad('数据卷媒体 URL 不合法')
+      }
+      return {
+        name,
+        mountPath,
+        serveUrl: serveUrl || null,
+        hostPath,
+        readOnly: Boolean(item?.readOnly),
+        owner: item?.owner && OWNER_RE.test(String(item.owner)) ? String(item.owner) : null,
+      }
+    })
+  }
+
+  const env = normalizeEnvEntries(input.env)
+  const now = new Date().toISOString()
+  const statuses = ['idle', 'deploying', 'running', 'stopped', 'failed']
+  return {
+    id,
+    serverId,
+    name,
+    kind,
+    domain,
+    image,
+    notes: String(input.notes || '').slice(0, NOTES_MAX),
+    envEnc: env.length ? encrypt(JSON.stringify(env)) : null,
+    runtime: { port, healthPath: kind === 'image' ? normalizeHealthPath(input.runtime?.healthPath) : null },
+    volumes,
+    service,
+    delivery: {
+      version: input.delivery?.version ?? null,
+      tag: input.delivery?.tag ?? null,
+      commit: input.delivery?.commit ?? null,
+      deployedAt: input.delivery?.deployedAt ?? null,
+    },
+    status: statuses.includes(input.status) ? input.status : 'idle',
+    warning: null,
+    lastError: null,
+    createdAt: input.createdAt || now,
+    updatedAt: now,
+  }
+}
+
+export function addAppRecord(input) {
+  const app = buildAppRecord(input)
+  load().push(app)
+  saveApps()
+  return app
 }
 
 export function publicApp(app) {

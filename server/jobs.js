@@ -4,13 +4,15 @@ const jobs = new Map()
 const locks = new Map()
 const MAX_LOG_LINES = 4000
 
-export function createJob(serverId, type, steps) {
+export function createJob(serverId, type, steps, mode = null) {
   const id = 'job_' + crypto.randomBytes(6).toString('hex')
   const now = new Date().toISOString()
   const job = {
     id,
     serverId,
     type,
+    // init 任务的执行模式：init 完整初始化 / apply 只跑变更步骤 / status 只读状态
+    mode,
     status: 'pending',
     currentStep: null,
     steps: steps.map((s) => ({ id: s.id, title: s.title, status: 'pending', startedAt: null, finishedAt: null, error: null })),
@@ -60,6 +62,16 @@ export function updateStep(job, stepId, patch) {
   emit(job, 'step', step)
 }
 
+// 运行时才知道真正要执行哪些步骤（取决于服务器台账），替换步骤列表并把新快照推给前端
+export function setSteps(job, steps) {
+  const previous = new Map(job.steps.map((s) => [s.id, s]))
+  job.steps = steps.map((s) => {
+    const old = previous.get(s.id)
+    return old ? { ...old, title: s.title } : { id: s.id, title: s.title, status: 'pending', startedAt: null, finishedAt: null, error: null }
+  })
+  emit(job, 'state', snapshot(job, false))
+}
+
 export function setJobState(job, status, error = null) {
   job.status = status
   job.error = error
@@ -72,6 +84,7 @@ export function snapshot(job, includeLogs = true) {
     id: job.id,
     serverId: job.serverId,
     type: job.type,
+    mode: job.mode,
     status: job.status,
     currentStep: job.currentStep,
     steps: job.steps,

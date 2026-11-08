@@ -22,6 +22,8 @@ export interface InitRecord {
   image?: string
   swapMb?: number
   addressPool?: string
+  // 初始化时使用的配置，用于和当前配置做差异对比
+  config?: ServerConfig
   unparsable?: boolean
   [key: string]: unknown
 }
@@ -80,6 +82,8 @@ export interface JobSnapshot {
   id: string
   serverId: string
   type: string
+  // init 任务的模式：init 完整初始化 / apply 只跑变更步骤 / status 只读状态
+  mode?: 'init' | 'apply' | 'status' | null
   status: 'pending' | 'running' | 'done' | 'failed' | 'interrupted'
   currentStep: string | null
   steps: JobStep[]
@@ -236,6 +240,53 @@ export interface AppVolumeInput {
   mountPath: string
   serveUrl?: string | null
   owner?: string | null
+}
+
+// 应用配置备份文件：环境变量以明文存放，导入时再加密落库
+export interface AppBackupEnv {
+  key: string
+  values: string[]
+  note?: string
+}
+
+export interface AppBackupApp {
+  id: string
+  server: { host: string; port: number; user: string } | null
+  name: string
+  kind: 'image' | 'service'
+  domain: string | null
+  image: string | null
+  notes?: string
+  env: AppBackupEnv[]
+  runtime: { port: number; healthPath: string | null }
+  volumes: AppVolume[]
+  service: AppServiceConfig | null
+  delivery: AppDelivery | null
+  status: AppRecord['status']
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface AppBackupFile {
+  format: string
+  version: number
+  exportedAt: string
+  warning?: string
+  servers: { name: string; host: string; port: number; user: string }[]
+  apps: AppBackupApp[]
+}
+
+export interface AppImportItem {
+  id: string
+  name: string
+  action: 'create' | 'skip' | 'error'
+  reason?: string
+}
+
+export interface AppImportPreview {
+  items: AppImportItem[]
+  unmatchedServers: string[]
+  summary: { create: number; skip: number; error: number }
 }
 
 export interface UpdateAppPayload {

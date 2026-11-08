@@ -1,5 +1,7 @@
 import type {
   AddServerPayload,
+  AppBackupFile,
+  AppImportPreview,
   AppRecord,
   AppTemplate,
   CheckReport,
@@ -64,10 +66,12 @@ export function runCheck(id: string, refreshMirrors = false) {
   })
 }
 
-export function startInit(id: string, config: ServerConfig) {
+export type InitMode = 'init' | 'apply' | 'status' | 'auto'
+
+export function startInit(id: string, config: ServerConfig, mode: InitMode = 'auto') {
   return request<{ job: JobSnapshot }>(`/api/servers/${id}/init`, {
     method: 'POST',
-    body: JSON.stringify({ config }),
+    body: JSON.stringify({ config, mode }),
   })
 }
 
@@ -81,6 +85,22 @@ export function listApps() {
 
 export function listTemplates() {
   return request<{ templates: AppTemplate[] }>('/api/templates')
+}
+
+export function exportAppsBackup() {
+  return request<AppBackupFile>('/api/apps/export')
+}
+
+export function importAppsBackup(data: unknown, dryRun: boolean) {
+  return request<{
+    preview?: AppImportPreview
+    imported?: AppRecord[]
+    skipped?: number
+    failed?: string[]
+  }>('/api/apps/import', {
+    method: 'POST',
+    body: JSON.stringify({ data, dryRun }),
+  })
 }
 
 export function createApp(payload: CreateAppPayload) {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api'
-import type { AppRecord, AppTemplate, EnvEntry, ServerRecord, UpdateAppPayload } from '../types'
+import type { AppImportPreview, AppRecord, AppTemplate, EnvEntry, ServerRecord, UpdateAppPayload } from '../types'
 import { Modal } from '../components/Modal'
 import { TerminalLog, type TerminalLine } from '../components/TerminalLog'
 import { PageHeader } from '../components/PageHeader'
@@ -79,6 +79,14 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
   const [stopping, setStopping] = useState(false)
   const [startingId, setStartingId] = useState<string | null>(null)
 
+  const [importOpen, setImportOpen] = useState(false)
+  const [importData, setImportData] = useState<unknown>(null)
+  const [importPreview, setImportPreview] = useState<AppImportPreview | null>(null)
+  const [importResult, setImportResult] = useState<{ imported: number; skipped: number; failed: string[] } | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
   const load = useCallback(async () => {
     try {
       const { apps: list } = await api.listApps()
@@ -89,6 +97,73 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
       setLoaded(true)
     }
   }, [onToast])
+
+  const exportBackup = useCallback(async () => {
+    try {
+      const backup = await api.exportAppsBackup()
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `ourjia-paas-apps-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      onToast('配置已导出（包含环境变量明文，请妥善保管文件）')
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : '导出失败')
+    }
+  }, [onToast])
+
+  const openImport = useCallback(() => {
+    setImportData(null)
+    setImportPreview(null)
+    setImportResult(null)
+    setImportError(null)
+    setImportOpen(true)
+  }, [])
+
+  const pickImportFile = useCallback(async (file: File | null) => {
+    setImportData(null)
+    setImportPreview(null)
+    setImportResult(null)
+    setImportError(null)
+    if (!file) return
+    try {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(await file.text())
+      } catch {
+        throw new Error('文件不是合法的 JSON')
+      }
+      const { preview } = await api.importAppsBackup(parsed, true)
+      setImportData(parsed)
+      setImportPreview(preview ?? null)
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : '读取配置文件失败')
+    }
+  }, [])
+
+  const runImport = useCallback(async () => {
+    if (!importData || importing) return
+    setImporting(true)
+    setImportError(null)
+    try {
+      const result = await api.importAppsBackup(importData, false)
+      setImportResult({
+        imported: result.imported?.length || 0,
+        skipped: result.skipped || 0,
+        failed: result.failed || [],
+      })
+      onToast(`已导入 ${result.imported?.length || 0} 个应用`)
+      await load()
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : '导入失败')
+    } finally {
+      setImporting(false)
+    }
+  }, [importData, importing, load, onToast])
 
   useEffect(() => {
     load()
@@ -423,6 +498,12 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
         title="应用"
         subtitle="Web 应用经 Traefik 暴露域名；共享服务只挂 shared-net，不暴露公网。"
       >
+        <button className="btn ghost" onClick={openImport}>
+          导入配置
+        </button>
+        <button className="btn ghost" onClick={exportBackup} disabled={!apps.length}>
+          导出配置
+        </button>
         <button className="btn primary" onClick={onOpenCreate} disabled={!servers.length}>
           <PlusIcon />
           新建应用
@@ -446,6 +527,12 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
               ? '点击右上角「新建应用」，创建 Web 应用或共享服务（如 PostgreSQL）。'
               : '先到「服务器」页添加并初始化一台服务器。'}
           </p>
+          {servers.length > 0 && (
+            <p className="muted-note">
+              服务器上已经部署的应用不会自动出现，需要手工新建；建好后建议点「导出配置」留一份
+              JSON 备份（包含环境变量，可随时导入恢复）。
+            </p>
+          )}
           {!servers.length && (
             <button className="btn ghost" onClick={onGoServers}>
               去添加服务器
@@ -995,6 +1082,129 @@ export function AppsPage({ servers, createOpen, onOpenCreate, onCloseCreate, onG
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={importOpen}
+        onClose={() => {
+          if (!importing) {
+            setImportOpen(false)
+            setImportData(null)
+            setImportPreview(null)
+            setImportResult(null)
+            setImportError(null)
+          }
+        }}
+        title="导入应用配置"
+      >
+        <div className="form-grid">
+          <p className="confirm-lede">
+            导入本平台导出的应用配置文件。按「服务器地址 + 端口 + SSH 用户」匹配已添加的服务器，只新增应用，
+            不覆盖已有应用；环境变量导入后会重新加密保存。
+          </p>
+
+          <div className="file-row">
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => importFileRef.current?.click()}
+              disabled={importing}
+            >
+              选择配置文件
+            </button>
+            <span className="muted-note mono">ourjia-paas-apps-YYYY-MM-DD.json</span>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                pickImportFile(e.target.files?.[0] || null)
+                e.target.value = ''
+              }}
+            />
+          </div>
+
+          {importError && <div className="form-error">{importError}</div>}
+
+          {importResult ? (
+            <>
+              <p className="muted-note">
+                已导入 {importResult.imported} 个应用 · 跳过 {importResult.skipped} 个 · 失败{' '}
+                {importResult.failed.length} 个
+              </p>
+              {importResult.failed.length > 0 && (
+                <ul className="confirm-list">
+                  {importResult.failed.map((message) => (
+                    <li key={message}>{message}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : importPreview ? (
+            <>
+              <p className="muted-note">
+                可导入 {importPreview.summary.create} 个 · 已存在跳过 {importPreview.summary.skip} 个 · 失败{' '}
+                {importPreview.summary.error} 个
+              </p>
+              {importPreview.unmatchedServers.length > 0 && (
+                <p className="form-hint">
+                  以下服务器还没有添加到平台，相关应用无法导入：
+                  {importPreview.unmatchedServers.join('、')}
+                </p>
+              )}
+              <ul className="res-list">
+                {importPreview.items.map((item, index) => (
+                  <li key={`${index}:${item.id}`} className="res-row static">
+                    <span className="res-kind">
+                      {item.action === 'create' ? '导入' : item.action === 'skip' ? '跳过' : '失败'}
+                    </span>
+                    <span className="mono">{item.name}</span>
+                    <span className="res-meta">{item.reason || ''}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="form-hint">
+                文件中的环境变量是明文；导入后平台会重新加密存储，原文件请自行妥善保管或删除。
+              </p>
+            </>
+          ) : (
+            <p className="form-hint">
+              配置文件由「导出配置」生成，包含应用、环境变量与数据卷信息；不包含 SSH 凭据，所以需要先添加好对应服务器。
+            </p>
+          )}
+
+          <div className="modal-foot">
+            <button
+              className="btn ghost"
+              onClick={() => {
+                setImportOpen(false)
+                setImportData(null)
+                setImportPreview(null)
+                setImportResult(null)
+                setImportError(null)
+              }}
+              disabled={importing}
+            >
+              {importResult ? '完成' : '取消'}
+            </button>
+            {!importResult && (
+              <button
+                className="btn primary"
+                onClick={runImport}
+                disabled={!importPreview || !importPreview.summary.create || importing}
+              >
+                {importing ? (
+                  <>
+                    <span className="spinner" /> 导入中…
+                  </>
+                ) : (
+                  `导入 ${importPreview?.summary.create ?? 0} 个应用`
+                )}
+              </button>
+            )}
+          </div>
+        </div>
       </Modal>
     </div>
   )

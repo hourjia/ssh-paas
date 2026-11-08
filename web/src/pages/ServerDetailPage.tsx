@@ -75,6 +75,7 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
   const [job, setJob] = useState<JobSnapshot | null>(null)
   const [logs, setLogs] = useState<TerminalLine[]>([])
   const [confirmInit, setConfirmInit] = useState(false)
+  const [initMode, setInitMode] = useState<'init' | 'apply'>('init')
   const unsubRef = useRef<(() => void) | null>(null)
 
   const [resources, setResources] = useState<ServerResources | null>(null)
@@ -188,8 +189,12 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
       unsubRef.current = api.streamJob(jobId, {
         onState: (snap) => {
           setJob((prev) => ({ ...snap, logs: prev?.logs ?? snap.logs }))
-          if (snap.status === 'done') onToast('初始化完成')
-          if (snap.status === 'failed') onToast(`初始化失败：${snap.error || '未知错误'}`)
+          if (snap.status === 'done') {
+            onToast(
+              snap.mode === 'apply' ? '配置变更已应用' : snap.mode === 'status' ? '已获取服务器状态' : '初始化完成',
+            )
+          }
+          if (snap.status === 'failed') onToast(`执行失败：${snap.error || '未知错误'}`)
           if (snap.status === 'done' || snap.status === 'failed') {
             runCheck(false, true)
           }
@@ -205,19 +210,22 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
     [onToast, runCheck],
   )
 
-  const startInit = useCallback(async () => {
-    if (!config) return
-    setConfirmInit(false)
-    setLogs([])
-    setTab('init')
-    try {
-      const { job: created } = await api.startInit(server.id, config)
-      setJob({ ...created, logs: [] })
-      attachStream(created.id)
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : '初始化启动失败')
-    }
-  }, [config, server.id, attachStream, onToast])
+  const startInit = useCallback(
+    async (mode: 'init' | 'apply') => {
+      if (!config) return
+      setConfirmInit(false)
+      setLogs([])
+      setTab('init')
+      try {
+        const { job: created } = await api.startInit(server.id, config, mode)
+        setJob({ ...created, logs: [] })
+        attachStream(created.id)
+      } catch (e) {
+        onToast(e instanceof Error ? e.message : '初始化启动失败')
+      }
+    },
+    [config, server.id, attachStream, onToast],
+  )
 
   const grouped = useMemo(() => {
     if (!report) return []
@@ -229,6 +237,11 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
     }
     return report.groups.filter((g) => map.has(g)).map((g) => ({ group: g, items: map.get(g)! }))
   }, [report])
+
+  const initChanges = useMemo(
+    () => describeConfigChanges(report?.record?.config, config),
+    [report, config],
+  )
 
   const badge = stateBadge(server)
   const target = `${server.user}@${server.host}${server.port !== 22 ? `:${server.port}` : ''}`
@@ -268,9 +281,29 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
             {checking ? <span className="spinner" /> : <RefreshIcon />}
             重新检查
           </button>
-          <button className="btn primary" onClick={() => setConfirmInit(true)} disabled={running || !config}>
-            {running ? '初始化中…' : report?.initialized ? '重新初始化' : '开始初始化'}
-          </button>
+          {!report?.initialized ? (
+            <button
+              className="btn primary"
+              onClick={() => {
+                setInitMode('init')
+                setConfirmInit(true)
+              }}
+              disabled={running || !config}
+            >
+              {running ? '初始化中…' : '开始初始化'}
+            </button>
+          ) : report.upToDate ? null : (
+            <button
+              className="btn primary"
+              onClick={() => {
+                setInitMode('apply')
+                setConfirmInit(true)
+              }}
+              disabled={running || !config}
+            >
+              {running ? '执行中…' : '应用配置变更'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -426,7 +459,7 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
                   {report.upToDate
                     ? '服务器已按当前配置完成初始化。'
                     : report.initialized
-                      ? '检测到配置与台账不一致，建议重新初始化以应用新配置。'
+                      ? '检测到配置与台账不一致，可在「初始化」中应用配置变更（只执行受影响步骤）。'
                       : '服务器尚未初始化，可前往「初始化」执行。'}
                 </div>
               </div>
@@ -458,15 +491,84 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
       {tab === 'init' && (
         <div className="panel-stack">
           {!job && (
-            <section className="glass-lite panel center-panel">
-              <p className="init-lede">
-                {report?.initialized
-                  ? '服务器已初始化。若修改了配置，可重新执行以应用变更；已完成的步骤会自动跳过。'
-                  : '将依次完成：预检 → 基础工具/时区 → 安装 Docker → 目录与网络 → Traefik → 台账。'}
-              </p>
-              <button className="btn primary" onClick={() => setConfirmInit(true)} disabled={!config}>
-                {report?.initialized ? '重新初始化' : '开始初始化'}
-              </button>
+            <section className="glass-lite panel">
+              {!report ? (
+                <p className="init-lede">
+                  <span className="spinner" /> 正在读取服务器状态…
+                </p>
+              ) : !report.initialized ? (
+                <>
+                  <p className="init-lede">
+                    这台服务器还没有初始化台账。将依次完成：预检 → 基础工具/时区 → 安装 Docker → 目录与网络
+                    → Traefik → 台账。
+                  </p>
+                  <button
+                    className="btn primary"
+                    onClick={() => {
+                      setInitMode('init')
+                      setConfirmInit(true)
+                    }}
+                    disabled={!config}
+                  >
+                    开始初始化
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h2 className="panel-title">服务器已初始化</h2>
+                  <p className="init-lede">
+                    台账完成于{' '}
+                    {report.record?.finishedAt ? fmtTime(String(report.record.finishedAt)) : '未知'}。
+                    已初始化的服务器不会再重复执行初始化步骤：不会重装 Docker、不会重新拉取 Traefik 镜像，
+                    只会读取服务器状态。
+                  </p>
+                  {report.upToDate ? (
+                    <p className="muted-note">当前配置与台账一致，没有需要应用的变更。</p>
+                  ) : (
+                    <>
+                      <p className="muted-note">当前配置与台账不一致，只有下列变更会影响执行步骤：</p>
+                      <ul className="confirm-list">
+                        {(initChanges.length
+                          ? initChanges
+                          : ['配置指纹与台账不同（具体变更项无法从台账还原）']
+                        ).map((c) => (
+                          <li key={c}>{c}</li>
+                        ))}
+                      </ul>
+                      <button
+                        className="btn primary"
+                        onClick={() => {
+                          setInitMode('apply')
+                          setConfirmInit(true)
+                        }}
+                        disabled={!config || running}
+                      >
+                        {running ? '执行中…' : '应用配置变更'}
+                      </button>
+                    </>
+                  )}
+                  <div className="res-actions" style={{ marginTop: 16 }}>
+                    <button className="btn ghost" onClick={() => runCheck(true)} disabled={checking || running}>
+                      {checking ? <span className="spinner" /> : <RefreshIcon />}
+                      获取服务器状态
+                    </button>
+                    <button
+                      className="btn ghost"
+                      onClick={() => {
+                        setInitMode('init')
+                        setConfirmInit(true)
+                      }}
+                      disabled={!config || running}
+                    >
+                      强制重新初始化…
+                    </button>
+                  </div>
+                  <p className="form-hint">
+                    「应用配置变更」只执行受影响步骤（例如只改 daemon.json 就只重载 Docker），不会重装组件；
+                    「强制重新初始化」才会完整执行全部步骤，仅在服务器环境损坏时使用。
+                  </p>
+                </>
+              )}
             </section>
           )}
 
@@ -494,11 +596,19 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
               </ol>
               {job.status === 'failed' && (
                 <div className="form-error init-error">
-                  初始化失败：{job.error}
+                  执行失败：{job.error}
                   {job.currentStep && '，可从该步骤重试。'}
                 </div>
               )}
-              {job.status === 'done' && <div className="init-success">初始化已完成，服务器已就绪。</div>}
+              {job.status === 'done' && (
+                <div className="init-success">
+                  {job.mode === 'apply'
+                    ? '配置变更已应用，台账已更新。'
+                    : job.mode === 'status'
+                      ? '已获取服务器状态，未做任何修改。'
+                      : '初始化已完成，服务器已就绪。'}
+                </div>
+              )}
             </section>
           )}
 
@@ -705,29 +815,76 @@ export function ServerDetailPage({ server, onBack, onServerUpdate, onToast }: Se
         <ConfirmInit
           server={server}
           config={config}
+          mode={initMode}
           initialized={Boolean(report?.initialized)}
+          changes={initChanges}
           onCancel={() => setConfirmInit(false)}
-          onConfirm={startInit}
+          onConfirm={() => startInit(initMode)}
         />
       )}
     </div>
   )
 }
 
+function describeConfigChanges(prevRaw: unknown, cur: ServerConfig | null): string[] {
+  if (!cur || !prevRaw || typeof prevRaw !== 'object') return []
+  const prev = prevRaw as Partial<ServerConfig>
+  const list = (v?: string[] | null) => (v && v.length ? v.join('、') : '未设置')
+  const source = (v?: ServerConfig['dockerInstallSource']) =>
+    v === 'official' ? '官方源' : v === 'system' ? '系统源' : '自动'
+  const out: string[] = []
+
+  if (JSON.stringify(prev.dockerHubMirrors ?? []) !== JSON.stringify(cur.dockerHubMirrors)) {
+    out.push(`镜像加速：${list(prev.dockerHubMirrors)} → ${list(cur.dockerHubMirrors)}`)
+  }
+  if ((prev.aptMirror ?? null) !== cur.aptMirror) {
+    out.push(`apt 镜像：${prev.aptMirror || '跟随系统'} → ${cur.aptMirror || '跟随系统'}`)
+  }
+  if ((prev.dockerInstallSource ?? 'auto') !== cur.dockerInstallSource) {
+    out.push(`Docker 安装源：${source(prev.dockerInstallSource)} → ${source(cur.dockerInstallSource)}`)
+  }
+  if (String(prev.swapMb ?? 'auto') !== String(cur.swapMb)) {
+    out.push(`swap：${prev.swapMb ?? 'auto'} → ${cur.swapMb}`)
+  }
+  if ((prev.swappiness ?? 10) !== cur.swappiness) {
+    out.push(`vm.swappiness：${prev.swappiness ?? 10} → ${cur.swappiness}`)
+  }
+  if ((prev.traefikVersion ?? '') !== cur.traefikVersion) {
+    out.push(`Traefik：${prev.traefikVersion ?? '未知'} → ${cur.traefikVersion}`)
+  }
+  if ((prev.acme?.ca ?? '') !== cur.acme.ca) {
+    out.push(`ACME CA：${prev.acme?.ca ?? '未知'} → ${cur.acme.ca}`)
+  }
+  if ((prev.acme?.email ?? '') !== cur.acme.email) {
+    out.push(`ACME 邮箱：${prev.acme?.email || '未填'} → ${cur.acme.email || '未填'}`)
+  }
+  if (JSON.stringify(prev.advanced?.containerDns ?? null) !== JSON.stringify(cur.advanced.containerDns)) {
+    out.push(`容器 DNS：${list(prev.advanced?.containerDns)} → ${list(cur.advanced.containerDns)}`)
+  }
+  if ((prev.advanced?.dockerAddressPool ?? null) !== cur.advanced.dockerAddressPool) {
+    out.push(`地址池：${prev.advanced?.dockerAddressPool ?? '自动'} → ${cur.advanced.dockerAddressPool ?? '自动'}`)
+  }
+  return out
+}
+
 function ConfirmInit({
   server,
   config,
+  mode,
   initialized,
+  changes,
   onCancel,
   onConfirm,
 }: {
   server: ServerRecord
   config: ServerConfig | null
+  mode: 'init' | 'apply'
   initialized: boolean
+  changes: string[]
   onCancel: () => void
   onConfirm: () => void
 }) {
-  const changes = [
+  const fullChanges = [
     '安装 git / curl，校准时区与 NTP',
     config?.swapMb === 'auto' ? '按内存自动配置 swap' : `配置 ${config?.swapMb} MB swap`,
     `vm.swappiness = ${config?.swappiness}`,
@@ -739,29 +896,48 @@ function ConfirmInit({
     '配置 Traefik 访问日志轮转（保留 14 天）',
     '写入 /srv/.ourjia/init.json 台账',
   ]
+  const isApply = mode === 'apply'
+  const isForce = mode === 'init' && initialized
+  const items = isApply
+    ? changes.length
+      ? changes
+      : ['配置指纹不同，但服务器状态已一致：只会更新台账文件']
+    : fullChanges
   return (
     <div className="modal open" role="dialog" aria-modal="true" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
       <div className="modal-card glass sheen">
         <div className="modal-head">
-          <h2>{initialized ? '重新初始化' : '确认初始化'}</h2>
+          <h2>{isApply ? '应用配置变更' : isForce ? '强制重新初始化' : '确认初始化'}</h2>
         </div>
         <p className="confirm-lede">
-          即将对 <strong>{server.name}</strong>（{server.host}）执行以下变更：
+          {isApply ? (
+            <>
+              将只对 <strong>{server.name}</strong>（{server.host}）执行受影响的步骤：
+            </>
+          ) : (
+            <>
+              即将对 <strong>{server.name}</strong>（{server.host}）执行以下变更：
+            </>
+          )}
         </p>
         <ul className="confirm-list">
-          {changes.map((c) => (
+          {items.map((c) => (
             <li key={c}>{c}</li>
           ))}
         </ul>
         <p className="form-hint">
-          已完成的步骤会自动跳过，重复执行是安全的。防火墙策略不会被修改。若服务器上已有 Traefik 或占用 80/443 的服务，初始化会在预检阶段停止。初始化完成后会从平台侧实测公网 80/443，安全组未放行会显示在「检查」里。
+          {isApply
+            ? '只会执行需要的步骤：不会重装 Docker 或 Traefik；若仅 daemon.json 变化，只会重载 Docker。执行完会更新 /srv/.ourjia/init.json 台账。'
+            : isForce
+              ? '这是完整初始化：会重新执行全部步骤，包括重写 daemon.json、拉取 Traefik 镜像与 docker compose up。仅在服务器环境被破坏时使用。'
+              : '已完成的步骤会自动跳过，重复执行是安全的。防火墙策略不会被修改。若服务器上已有 Traefik 或占用 80/443 的服务，初始化会在预检阶段停止。初始化完成后会从平台侧实测公网 80/443，安全组未放行会显示在「检查」里。'}
         </p>
         <div className="modal-foot">
           <button className="btn ghost" onClick={onCancel}>
             取消
           </button>
-          <button className="btn primary" onClick={onConfirm}>
-            确认执行
+          <button className={`btn ${isForce ? 'danger' : 'primary'}`} onClick={onConfirm}>
+            {isApply ? '应用变更' : isForce ? '强制重新初始化' : '确认执行'}
           </button>
         </div>
       </div>
